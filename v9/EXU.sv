@@ -179,6 +179,11 @@ module EXU (
             valid_next <= 1'b0;
     end
 
+    // MDU 结果总线：**必须先声明**再用。否则按 Verilog 隐式网络规则，
+    //   第 206 行的 mdu_res 会被当成 1 位隐式 wire（ModelSim vlog-2730 直接硬报错，
+    //   iverilog 宽容通过但语义不可移植）——乘除法结果会整体失真。
+    logic [31:0] mdu_res;
+
     // MDU 状态机（v9 修复 B3 后简化为 IDLE/WAIT 两态）：
     //   IDLE --start--> WAIT --done--> IDLE
     //   “结果窗口再多停一拍”的职责已经由 mdu_stall = opc[4] & ~mdu_res_vld 承担，
@@ -288,7 +293,6 @@ end
 
 
     logic [31:0] alu_res;
-    logic [31:0] mdu_res;
     logic [31:0] exec_res;
     
 

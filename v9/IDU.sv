@@ -155,6 +155,19 @@ module IDU(
     logic [31:0] csrs;
     logic [31:0] imm;
 
+    // 指令类型译码位：**必须先声明**再用（下方 csr_wen_next 位图要用 is_SYS）。
+    logic is_S;
+    logic is_I0;
+    logic is_U0;
+    logic is_U1;
+    logic is_J;
+    logic is_I2;
+    logic is_I1;
+    logic is_R;
+    logic is_B;
+    logic is_SYS;
+    logic is_MEXT;   // RV32M：R 型且 funct7 = 0000001
+
     assign oprand                      = inst_d[31:25];
     assign opcode                      = inst_d[6:0];
     assign rs1                         = inst_d[19:15];
@@ -181,17 +194,6 @@ module IDU(
         (is_SYS && csr_addr == `CSR_mepc)
     };
 
-    logic is_S;
-    logic is_I0;
-    logic is_U0;
-    logic is_U1;
-    logic is_J;
-    logic is_I2;
-    logic is_I1;
-    logic is_R;
-    logic is_B;
-    logic is_SYS;
-    logic is_MEXT;   // RV32M：R 型且 funct7 = 0000001
     assign is_S   = (opcode == `S_opcode);
     assign is_I0  = (opcode == `I0_opcode);
     assign is_U0  = (opcode == `U0_opcode);

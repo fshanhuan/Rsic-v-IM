@@ -125,6 +125,9 @@ module Control (
     //   所以：hold 期间把判定连同**方向与目标**一起挂起，等取指侧能接收时补发一次。
     //   同时把 bp_misp_pend 送给 EXU，让它在挂起期间**不接收新指令** —— 否则错路径
     //   的那条会在补发前溜进 EX 并被提交（实测 rnd034：x16 被错路径的 jal 写坏）。
+    // 系统重定向（mret/ecall/fence.i）标志：**必须先声明**，下面一行括弧里就要用。
+    logic system_redirect;
+
     logic bp_misp_det;                       // 判定条件为真（不受 mem_stall 影响）
     assign bp_misp_det = EXU_ctrl_valid & ~(intr_take | system_redirect) &
                          ((actual_taken != EXU_pred_taken) ||
@@ -133,6 +136,7 @@ module Control (
     logic        bp_misp_pend;               // 判定被 hold 挡住，等待补发
     logic        bp_pend_taken;              // 挂起时的实际方向
     logic [31:0] bp_pend_target;             // 挂起时的实际目标（含“不跳则 pc+4”）
+    logic        bp_mispredict_raw;          // 判定存在（尚未去抖/去重），见下
 
     // 补发脉冲：hold 结束后（~mem_stall）本拍可发；否则先挂起。
     assign bp_mispredict_raw = (bp_misp_det | bp_misp_pend) & ~mem_stall;
@@ -189,7 +193,7 @@ module Control (
     assign bp_update_target = actual_target;
 
     // 系统事件（异常返回 / ecall / fence.i）不由预测器覆盖，必须强制重定向。
-    logic system_redirect;
+    // （system_redirect 的声明已上移到首次使用处之前）
     assign system_redirect = mret_flag | ecall_flag | fence_i_flag;
 
     // -----------------------------------------------------------------------

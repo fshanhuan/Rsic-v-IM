@@ -140,6 +140,11 @@ module myCPU (
   logic IFU_stall_ctrl;   // 来自 Control：load-use 冒险等前端暂停请求
   logic load_use_stall;   // 来自 Control：只含 load-use 冒险（供 EXU_inst_clear 使用；引出便于波形观察）
   logic icache_clr;
+  // 存储侧 hold：**必须先声明**，下面第 152 行就要用。
+  //   （原写在文件后段，ModelSim vlog-2730 判为"未定义变量"硬报错，
+  //     因为它会先按隐式 1 位 wire 建网、再报"已被重复声明"。）
+  logic icache_hold;
+  logic dcache_hold;
 
   // IFU/IDU 共用的暂停请求，三个来源必须同源：
   //   - Control.IFU_stall : load-use 冒险（后端数据还没准备好）
@@ -180,7 +185,6 @@ module myCPU (
   logic [31:0] icache_rdata;
   logic        icache_hit;
   logic        icache_miss;
-  logic        icache_hold;
   logic        icache_fetch_align;
   logic        icache_mem_en;
   logic [31:0] icache_hit_cnt;
@@ -193,7 +197,6 @@ module myCPU (
   logic [31:0] lsu_bus_rdata;
   logic        dcache_hit;
   logic        dcache_miss;
-  logic        dcache_hold;
   logic        dcache_mem_en;
   logic [31:0] dcache_hit_cnt;
   logic [31:0] dcache_miss_cnt;

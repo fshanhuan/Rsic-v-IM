@@ -124,10 +124,10 @@ module DCache #(
     // load 且行不驻留时才发读（命中直接从 data[] 取，不必等 DRAM）。
     // 必须是**一次性**的：mem_en 只高 1 拍，下一拍用 ~mem_en & mem_req_r
     // 就能标出 DRAM 数据返回的那一拍。
+    logic mem_req_r;      // 已经发过读（mem_en 为 1 过）—— 必须先声明，见下面的 cache_rd_req
     logic cache_rd_req;
     assign cache_rd_req = cpu_en_r & ~cpu_wen_r & ~line_resident & ~mem_req_r;
 
-    logic mem_req_r;      // 已经发过读（mem_en 为 1 过）
     logic mem_data_vld;   // 本拍 mem_rdata 已是本次读的返回数据
     assign mem_data_vld = ~cache_rd_req & mem_req_r;
 
