@@ -81,7 +81,10 @@ module tb_difftest;
         else if (perip_ren) perip_rdata <= dram[dram_word_addr];
     end
 
-    always_ff @(posedge clk) begin
+    // 用 always 而非 always_ff：dram 还要在下面的 initial 里被清零，而 SV LRM
+    //   禁止 always_ff 写过的变量再被别的进程写（ModelSim vlog-7061 报 Error，
+    //   并且**拒绝把该模块写入库**，随后 vsim 报 vopt-13130 找不到设计单元）。
+    always @(posedge clk) begin
         if (perip_wen) dram[dram_word_addr] <= dram_din;
     end
 
