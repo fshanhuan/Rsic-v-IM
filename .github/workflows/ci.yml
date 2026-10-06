@@ -77,3 +77,11 @@ jobs:
             RegisterFile.sv CSR.sv EXU.sv ALU.sv experimental/MDU_pipelined.sv \
             LSU.sv DCache.sv WBU.sv Data_hazard.sv Control.sv add.sv sext.sv \
             Reg.sv board/tb_board_top.sv
+
+      # v9 修复：原来只"编译"板级测试台、从不运行它，于是它 FAIL 也不会被 CI 发现
+      #（实测：上板改造交付时 board/tb_board_top.sv 就是 FAIL，而 README 写着 PASS）。
+      # 板级测试台用的是 board/sync_mem.sv（**带读使能的真实 BRAM 语义**），
+      # 是唯一能暴露 DCache 读握手类问题的回归，必须真正跑起来。
+      - name: 运行板级顶层自检
+        working-directory: v9
+        run: vvp sim/build/tb_board.vvp +prog=sim/prog.hex

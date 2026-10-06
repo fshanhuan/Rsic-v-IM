@@ -117,21 +117,28 @@ module tb_dcache_unit;
         cpu_en = 0; repeat (3) @(posedge clk);
 
         /* === ② 写直达 + 缓存行一致性 ===
-           注意：模块级环境里 store 的 cpu_en/cpu_wen 由测试台直接驱动，
-           与真实 LSU 的 pipe 级时序不同，store 脉冲的**逐拍对齐**在整机
-           回归（sim/tb_iverilog.sv 的 write-once 检查）里验证更可靠，
-           那里已经 PASS。本测试台因此只覆盖读回填与 MMIO 两条路径。
-           这一段仅打印观测值，不作为 pass/fail 判据。 */
+           v9 修复：这里必须在**时钟沿后 1ns** 驱动 cpu_en/cpu_wen。
+             原来在沿上直接阻塞赋值，而 DUT 里 `store_fire` 是连续赋值、
+             `store_req_r <= store_fire` 在 always_ff 内：同一时间步里两个进程的
+             求值顺序不确定 —— 实测状态机推进了、写脉冲却读到旧值，导致这条
+             单元测试**一次 store 都没有真正发出去**（wr_seen=0），后面那条
+             "store 后读回"的观测自然也是 0。改成沿后 1ns 驱动后脉冲正常，
+             于是这里可以升级成真正的判据（原来只打印观测值）。 */
+        @(posedge clk); #1;
         cpu_en = 1; cpu_wen = 1; cpu_addr = 32'h20; cpu_wdata = 32'hCAFE_1234; cpu_mask = 2'b10;
         repeat (6) @(posedge clk);
+        @(posedge clk); #1;
         cpu_en = 0; cpu_wen = 0; repeat (3) @(posedge clk);
         $display("  store observation: last_wr addr=%h data=%h wr_seen=%b dram[8]=%h",
                  last_wr_addr, last_wr_data, got_wr, dram[8]);
+        chk("WRITE 0x20 write-through (dram word)", dram[8], 32'hCAFE_1234);
 
         /* 写直达之后重新读该地址：必须拿到存储器里的值（不能残留旧缓存行） */
+        @(posedge clk); #1;
         cpu_en = 1; cpu_wen = 0; cpu_addr = 32'h20; cpu_mask = 2'b10;
         wait_access;
         $display("  LOAD 0x20 (after store) observation = %h (dram[8]=%h)", cpu_rdata, dram[8]);
+        chk("LOAD 0x20 after store", cpu_rdata, 32'hCAFE_1234);
         cpu_en = 0; repeat (3) @(posedge clk);
 
         /* 再次读 0x10：应当命中缓存 */
@@ -163,7 +170,18 @@ module tb_dcache_unit;
         end
 
         $display("");
-        $display(nfail == 0 ? "DCACHE-UNIT: PASS" : "DCACHE-UNIT: FAIL");
+        // v9 修复：原来这里是 `$display(nfail == 0 ? "DCACHE-UNIT: PASS" : "DCACHE-UNIT: FAIL");`
+        //   —— 没有格式符，字符串字面量被当成 136 位整数打印（日志里那串
+        //   23228598090284490058663670033758753477459 就是 "DCACHE-UNIT: PASS"），
+        //   而且全文没有 $fatal：run_all.sh 按 vvp 退出码判定，正常结束恒为 0，
+        //   于是这一项**永远不可能失败**（把期望值改坏也照样算 PASS）。
+        //   现在明确打印并让失败真正把回归打红。
+        if (nfail == 0) begin
+            $display("DCACHE-UNIT: PASS");
+        end else begin
+            $display("DCACHE-UNIT: FAIL (%0d checks failed)", nfail);
+            $fatal(1, "DCACHE-UNIT: FAIL");
+        end
         $finish;
     end
 

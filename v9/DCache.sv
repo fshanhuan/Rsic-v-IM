@@ -138,11 +138,36 @@ module DCache #(
     logic access_en;
     assign access_en = addr_same_r & mem_data_vld;
 
-    assign hit  = line_resident;
-    assign miss = access_en & ~hit;
+    // -----------------------------------------------------------------------
+    // v9 修复（B2）：读握手契约必须保证「hold 撤销的那一拍，cpu_rdata 就是
+    //   **当前正在请求的那个地址**的数据」。
+    //   原实现用 resp_valid_r（= cpu_en 延迟 2 拍）当门，而 cpu_index_r/cpu_tag_r
+    //   只延迟 1 拍，两者错开一拍；更关键的是 hold 里的 `| cache_rd_req` 会在
+    //   **发出读的那一拍**就把 hold 解掉 —— 数据还没回来，LSU 却已被放行，
+    //   于是把上一拍的总线残留值（或 x）锁进 rdata_reg2，真正的数据落在一个
+    //   valid=0 的气泡上。tb_iverilog.sv 的 DRAM 读口不门控（每拍都读），
+    //   恰好掩盖了它；换成带读使能的真实 BRAM（board/sync_mem）就变成 x。
+    //
+    //   新口径（与「同步 BRAM：请求 1 拍、数据 1 拍后到」严格对应）：
+    //     hit_now     : 用**当前**地址组合判断是否命中 -> 本拍 cpu_rdata 已可用；
+    //     resp_for_now: 本拍 mem_rdata 是**当前地址**那次读的返回（地址在 hold
+    //                   期间保持不动，所以比较寄存后的 index/tag 即可）；
+    //     hold        : 请求存在且两者都不成立时才停拍。
+    //   这样 hold 撤销的那一拍，cpu_rdata 一定是这条 load 的数据。
+    // -----------------------------------------------------------------------
+    logic hit_now;
+    assign hit_now = cpu_en & ~cpu_wen & ~uncacheable_req
+                   & valid[index] & (tag[index] == tag_in);
 
-    // 命中取缓存行；未命中直接给 DRAM 回来的原始整字（正好是这一拍）
-    assign cpu_rdata = hit ? data[cpu_index_r] : mem_rdata;
+    logic resp_for_now;
+    assign resp_for_now = mem_data_vld & (cpu_index_r == index) & (cpu_tag_r == tag_in);
+
+    // 本拍请求是否命中（供 cpu_rdata 与计数器使用）
+    assign hit  = hit_now;
+    assign miss = resp_for_now & ~hit_now;
+
+    // 命中取缓存行（当前地址的 index）；未命中直接给 DRAM 回来的原始整字
+    assign cpu_rdata = hit_now ? data[index] : mem_rdata;
 
     // load 停拍条件：本拍 mem_rdata 不是这条 load 的结果，且它自己还没发出读。
     //   ~mem_req_r | cache_rd_req 的含义：
@@ -153,7 +178,9 @@ module DCache #(
     //   那一拍 hold=1 把 LSU 的 pipe 级冻住，而发出读又需要缓一拍，
     //   于是 hold 自己把自己锁住（实测：load 之后整机停摆）。
     // store 是写直达，不依赖读数据，永不停拍。
-    assign hold = resp_valid_r & ~cpu_wen_r & ~hit & (~mem_req_r | cache_rd_req);
+    // load 的停拍：请求存在、且本拍 cpu_rdata 不是这条 load 的数据（既没命中、
+    // 也不是它的读返回）—— 必须停到数据真的可用那一拍为止（见上面的新口径）。
+    assign hold = (cpu_en & ~cpu_wen) & ~(hit_now | resp_for_now);
 
     /* ---------------- 4) store 请求单拍脉冲（状态机） ---------------- */
     localparam WR_IDLE  = 2'd0;
@@ -239,11 +266,11 @@ module DCache #(
                 store2_hit    <= ~uncacheable_req & valid[index] & (tag[index] == tag_in);
             end
 
-            // ---- 计数器 ----
-            if (access_en) begin
-                if (hit) hit_cnt <= hit_cnt + 32'd1;
-                else     miss_cnt <= miss_cnt + 32'd1;
-            end
+            // ---- 计数器（口径随新的判定侧一起更新，仅用于观测）----
+            //   命中：本拍请求就是由缓存行服务的；
+            //   缺失：这条缺失的读返回（即回填）那一拍记一次。
+            if (hit_now)                                    hit_cnt  <= hit_cnt + 32'd1;
+            if (resp_for_now & ~hit_now & ~uncacheable)     miss_cnt <= miss_cnt + 32'd1;
 
             // ---- load 未命中回填整字（此时 mem_data_vld=1，mem_rdata 就是本行数据）----
             //   MMIO 地址不回填（不分配），保证外设寄存器永远不会被缓存。

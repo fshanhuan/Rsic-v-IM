@@ -34,10 +34,15 @@ set VVP=D:\eda_tools\iverilog\bin\vvp.exe
 set GTKWAVE=D:\eda_tools\iverilog\gtkwave\bin\gtkwave.exe
 
 REM ---- program name -> expectation table id inside the testbench ----
-set PROG_ID=3
+set PROG_ID=9
 if /i "%PROG%"=="prog"     set PROG_ID=0
 if /i "%PROG%"=="prog_mul" set PROG_ID=1
 if /i "%PROG%"=="prog_div" set PROG_ID=2
+REM v9 second-round regression (byte/half offset, load data, backward branch, back-to-back div)
+if /i "%PROG%"=="prog_load_lane" set PROG_ID=3
+if /i "%PROG%"=="prog_load_use"  set PROG_ID=4
+if /i "%PROG%"=="prog_loop"      set PROG_ID=5
+if /i "%PROG%"=="prog_div_pair"  set PROG_ID=6
 
 REM ---- go to the v9 root: relative paths only ----
 cd /d "%~dp0.."

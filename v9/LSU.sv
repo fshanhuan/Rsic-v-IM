@@ -47,6 +47,10 @@ module LSU (
 
     output [31:0] rdata_wb_raw,
     output [2:0] funct3_wb,
+    // v9 修复（B1）：写回拍 load 地址的低 2 位。
+    //   WBU 也会按 funct3 再抽取一次（它是最终写回值来源），那里同样需要偏移，
+    //   否则 LSU 修好了、写回值仍然是"第 0 字节"。
+    output [1:0] rdata_offset_wb,
     output [15:0] csr_wen_wb,
     output [31:0] Ex_result_wb,
     output [31:0] rd_value_wb,
@@ -167,6 +171,8 @@ module LSU (
   assign pc_wb          = pc_reg2;
   assign rdata_wb_raw   = rdata_reg2;
   assign funct3_wb      = funct3_reg2;
+  // load 的 exec_res 就是有效地址，reg2 级把它随流水带过来了
+  assign rdata_offset_wb = Ex_result_fwd_reg2[1:0];
   assign csr_wen_wb     = csr_wen_reg2;
   assign Ex_result_wb   = Ex_result_fwd_reg2;
   assign rd_value_wb    = rd_value_reg2;
@@ -284,15 +290,51 @@ module LSU (
     endcase
   end
 
-  assign rdata_8u  = {24'd0, rdata[7:0]};
-  assign rdata_16u = {16'd0, rdata[15:0]};
+  // ---------------------------------------------------------------------------
+  // v9 修复（B1）：字节/半字读必须按**地址低 2 位**选道。
+  //   读口（DRAM / DCache / 板级同步 BRAM）返回的是"该地址所在字"的原始整字，
+  //   偏移信息只存在于地址里。原实现直接取 rdata[7:0] / rdata[15:0]，
+  //   等价于把 lb/lh/lbu/lhu 的第 1/2/3 字节全读成第 0 字节。
+  //   选道口径与写侧保持一致（DCache 的 store 合并、board/sync_mem 的 mask 写）：
+  //     字节：按 addr[1:0] 取 4 个字节之一；
+  //     半字：按 addr[1] 取低/高半字。
+  //   reg 级用 Ex_result_addr_reg[1:0]，reg2 级用 Ex_result_fwd_reg2[1:0]
+  //   （EXU 对 load 的 exec_res 就是有效地址，两级都随流水带过来了）。
+  // ---------------------------------------------------------------------------
+  logic [31:0] rdata_byte_sel;
+  logic [31:0] rdata_half_sel;
+  logic [31:0] rdata_byte_sel2;
+  logic [31:0] rdata_half_sel2;
+
+  always @(*) begin
+    case (Ex_result_addr_reg[1:0])
+      2'b00:   rdata_byte_sel = rdata;
+      2'b01:   rdata_byte_sel = {8'd0,  rdata[31:8]};
+      2'b10:   rdata_byte_sel = {16'd0, rdata[31:16]};
+      default: rdata_byte_sel = {24'd0, rdata[31:24]};
+    endcase
+  end
+  assign rdata_half_sel = Ex_result_addr_reg[1] ? {16'd0, rdata[31:16]} : rdata;
+
+  always @(*) begin
+    case (Ex_result_fwd_reg2[1:0])
+      2'b00:   rdata_byte_sel2 = rdata_reg2;
+      2'b01:   rdata_byte_sel2 = {8'd0,  rdata_reg2[31:8]};
+      2'b10:   rdata_byte_sel2 = {16'd0, rdata_reg2[31:16]};
+      default: rdata_byte_sel2 = {24'd0, rdata_reg2[31:24]};
+    endcase
+  end
+  assign rdata_half_sel2 = Ex_result_fwd_reg2[1] ? {16'd0, rdata_reg2[31:16]} : rdata_reg2;
+
+  assign rdata_8u  = {24'd0, rdata_byte_sel[7:0]};
+  assign rdata_16u = {16'd0, rdata_half_sel[15:0]};
 
   /* verilator lint_off PINMISSING */
   sext #(
       .DATA_WIDTH(8),
       .OUT_WIDTH (32)
   ) sext_i8 (
-      .data     (rdata[0+:8]),
+      .data     (rdata_byte_sel[7:0]),
       .sext_data(rdata_8i)
   );
 
@@ -300,19 +342,19 @@ module LSU (
       .DATA_WIDTH(16),
       .OUT_WIDTH (32)
   ) sext_i16 (
-      .data     (rdata[0+:16]),
+      .data     (rdata_half_sel[15:0]),
       .sext_data(rdata_16i)
   );
 
-  assign rdata_8u2  = {24'd0, rdata_reg2[7:0]};
-  assign rdata_16u2 = {16'd0, rdata_reg2[15:0]};
+  assign rdata_8u2  = {24'd0, rdata_byte_sel2[7:0]};
+  assign rdata_16u2 = {16'd0, rdata_half_sel2[15:0]};
 
   /* verilator lint_off PINMISSING */
   sext #(
       .DATA_WIDTH(8),
       .OUT_WIDTH (32)
   ) sext_i8_2 (
-      .data     (rdata_reg2[0+:8]),
+      .data     (rdata_byte_sel2[7:0]),
       .sext_data(rdata_8i2)
   );
 
@@ -320,7 +362,7 @@ module LSU (
       .DATA_WIDTH(16),
       .OUT_WIDTH (32)
   ) sext_i16_2 (
-      .data     (rdata_reg2[0+:16]),
+      .data     (rdata_half_sel2[15:0]),
       .sext_data(rdata_16i2)
   );
 

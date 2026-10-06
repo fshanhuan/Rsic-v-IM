@@ -63,22 +63,34 @@ module IFU (
     // 才允许推进 PC：否则 PC 会跑到取指数据前面，使 IDU 收到
     // 「下一条地址 + 上一条指令」的错配组合。
     logic advance_en;
-    logic pred_taken_valid;
-    assign advance_en       = valid & ready & inst_valid;
-    assign pred_taken_valid = pred_taken & inst_valid;
+    logic pred_take_en;
+    assign advance_en  = valid & ready & inst_valid;
+    // v9 修复（B4）：**预测跳转必须与顺序推进用同一个“本拍确实接收了这条指令”条件**。
+    //   原式 `pred_taken & inst_valid` 少了 valid/ready/~stall：当前这条指令还没被 IDU
+    //   锁存（停拍 / valid=0）时就把 PC 拨到预测目标，这条指令（很可能正是一条分支）
+    //   就被**丢掉**了 —— 它本该做出的"预测对不对"的判定再也没人做。
+    //   预测器一旦学会 taken，于是每次撞上取指 hold 就少判一条分支，循环彻底失控
+    //   （实测 loop_min 的 x1 涨到 2491，应为 10；同一程序在自带测试台上逐位复现）。
+    //   现在：只有这一拍确实交付并接收了指令，才允许投机拨 PC；否则保持 PC，
+    //   等这条指令被接收后再拨（或由 EX 级的真实重定向接管）。
+    assign pred_take_en = pred_taken & advance_en & ~stall;
 
     // PC 更新优先级：
     //   reset > dnpc 真实重定向 > 预测跳转 > stall 保持 > 顺序加 4。
-    // 重定向只要求 inst_valid（本拍确实交付了一条真指令），**不要求 valid**：
-    // 同步 BRAM 的取指握手会让 valid 在停拍/未对齐拍为 0，而 dnpc_flag 是
-    // 控制面已经确认的事实，用 valid 去 gate 会把它丢掉（实测踩到过：
-    // jal 已经在 EX 级解析出 dnpc=0x30，却因为那一拍 valid=0 而被丢弃）。
+    // v9 修复（B4/B7）：真实重定向**不能**再用 inst_valid 门控。
+    //   inst_valid（ICache.fetch_align）表示"本拍取回的数据确实属于当前 PC"——
+    //   而重定向本来就是**放弃**当前这次取指、把 PC 拨到确定的目标，与当前取指数据
+    //   是否对齐无关。原来要求 inst_valid，于是当重定向恰好落在取指 hold / 未对齐拍
+    //   （fetch_align=0）时会被**丢掉**：实测 `jal x2,T` 已经算出并写回了 link，
+    //   却发现下一条执行的是 pc+4（顺序路径）而不是 T；分支同理，方向被判对但
+    //   重定向没生效，CPU 一路沿错路径提交。
+    //   只保留 ready（下游可接收的结构性背压），dnpc/dnpc_flag 是控制面已确认的事实。
     always_ff @(posedge clock) begin
         if (reset)
             pc <= ResetValue;
-        else if (dnpc_flag & ready & inst_valid)
+        else if (dnpc_flag & ready)
             pc <= dnpc;
-        else if (pred_taken_valid & ready)
+        else if (pred_take_en & ready)
             pc <= pred_target;
         else if (stall & valid & ready)
             pc <= pc;

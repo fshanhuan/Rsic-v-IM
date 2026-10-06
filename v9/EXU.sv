@@ -60,7 +60,14 @@ module EXU (
     //   mul*  ：单拍出结果（busy 恒 0）
     //   div*  ：多拍迭代（busy 期间整机冻结）
     output logic mdu_busy,
-    output logic mdu_done
+    output logic mdu_done,
+
+    // v9 修复（B7）：误预测已确认但还没送达 IFU（被取指侧 hold 挡住）。
+    //   这段窗口里本级**不能接收新指令**：否则错路径的那条会赶在重定向补发之前
+    //   进入 EX 并被下游采走、提交（实测 rnd034：错路径的 jal 把 x16 写坏）。
+    //   注意只挡住"接收"，不挡"清空"：正在 EX 里那条被判错的跳转/分支仍然要在
+    //   重定向当拍正常交给 LSU（jal 的 link 写回靠的就是这一拍）。
+    input  logic bp_pend
 );
 
 
@@ -113,13 +120,15 @@ module EXU (
      * ------------------------------------------------------------------- */
     localparam MDU_IDLE = 2'd0;
     localparam MDU_WAIT = 2'd1;
-    localparam MDU_DONE = 2'd2;
 
     logic [1:0] mdu_state;
     logic       mdu_start;      // 本拍送出一条 M 指令
     logic       mdu_stall;      // 冻结条件
     logic       mdu_done_i;     // MDU 结果本拍有效（结果窗口）
     logic [31:0] mdu_res_reg;   // 结果窗口锁存下来的 MDU 结果
+    logic       mdu_issued;     // v9 修复（B3）：当前 EX 级这条 M 指令**已经**发给 MDU
+    logic       mdu_res_vld;    // v9 修复（B3）：当前 EX 级这条 M 指令的结果已锁存
+    logic       mdu_busy_i;     // MDU 自己的 busy（仅用于观察，不再直接驱动互锁）
 
     assign mdu_done_i = mdu_done;
     // 触发点必须是**已锁存**的 alu_opcode_reg[4]，不能用输入端口 alu_opcode：
@@ -127,11 +136,21 @@ module EXU (
     //   add2_reg。若用输入端口触发，状态机会比操作数早一拍进入 WAIT，
     //   结果 operands 还没锁存、MDU 也没收到 start，done 永远不来 → 死锁
     //   （实测：state 卡在 WAIT、res 恒 0）。
-    assign mdu_start  = (mdu_state == MDU_IDLE) & alu_opcode_reg[4];
-    // 冻结条件：WAIT 与 DONE 都冻结。
-    //   DONE 那一拍必须继续冻结：LSU 是在**下一个时钟沿**才把 EX_result 采走，
-    //   这一拍解冻会让同一条 M 指令被重复发射、结果被覆盖。
-    assign mdu_stall  = (mdu_state == MDU_WAIT) | (mdu_state == MDU_DONE);
+    // v9 修复（B3）：再加一层“这条指令已经发射过”的标志。
+    //   原式 `(state==IDLE) & opcode_reg[4]` 会在结果窗口结束、回到 IDLE 的那一拍
+    //   **用还没被换掉的旧 M 操作码再发射一次**（操作数寄存器在同一沿已经换成下一
+    //   条指令了），于是 MDU 把上一条的运算又算了一遍，结果被当成下一条指令的结果
+    //   锁进 mdu_res_reg —— 实测 div_pair：`div x4,x2,x2` 期望 1，实际拿到上一条
+    //   `div x3,x1,x2` 的 14（错位一条指令，链越长错得越远）。
+    assign mdu_start  = (mdu_state == MDU_IDLE) & alu_opcode_reg[4] & ~mdu_issued;
+    // v9 修复（B3）：冻结条件改成“EX 级是 M 指令、且**它自己的**结果还没锁存”。
+    //   原式只看状态机 WAIT/DONE：结果窗口结束那一拍解冻，而这一拍 EX 已经换成
+    //   下一条指令、mdu_res_reg 却还是上一条的结果 → 下游把它采走。
+    //   现在只要 EX 里的 M 指令没拿到自己的结果就一直冻结，跨过整个“换指令”的边沿。
+    assign mdu_stall  = alu_opcode_reg[4] & ~mdu_res_vld;
+    // 下游（LSU）与前端必须和 EXU 用**同一口径**冻结：EXU 在等 MDU 结果时，
+    //   LSU 也要停，否则它会在“EX 已换指令、结果还是旧的”那一拍把旧结果采走。
+    assign mdu_busy   = mdu_stall;
 
 
     // valid_next 体现执行级是否向后级真正送出一条有效指令；
@@ -160,25 +179,42 @@ module EXU (
             valid_next <= 1'b0;
     end
 
-    // MDU 状态机：IDLE --start--> WAIT --done--> DONE --(一拍)--> IDLE
+    // MDU 状态机（v9 修复 B3 后简化为 IDLE/WAIT 两态）：
+    //   IDLE --start--> WAIT --done--> IDLE
+    //   “结果窗口再多停一拍”的职责已经由 mdu_stall = opc[4] & ~mdu_res_vld 承担，
+    //   不再需要第三个状态（原来 WAIT→DONE→IDLE 的 DONE 拍正是错位的来源）。
     always_ff @(posedge clock) begin
         if(reset) begin
-            mdu_state <= MDU_IDLE;
+            mdu_state   <= MDU_IDLE;
             mdu_res_reg <= 32'b0;
+            mdu_issued  <= 1'b0;
+            mdu_res_vld <= 1'b0;
         end else begin
             case (mdu_state)
                 MDU_IDLE: if (mdu_start)  mdu_state <= MDU_WAIT;
-                MDU_WAIT: if (mdu_done_i) mdu_state <= MDU_DONE;
-                // 结果窗口停留一拍：LSU 在这个沿才把 EX_result 采走
+                MDU_WAIT: if (mdu_done_i) mdu_state <= MDU_IDLE;
                 default:                  mdu_state <= MDU_IDLE;
             endcase
 
+            // 每条 M 指令只发射一次：发射后置位，直到这条指令离开 EX 才清。
+            if (mdu_start) mdu_issued <= 1'b1;
+
             // 在结果窗口把 MDU 结果**锁存**下来。
             //   为什么要锁：MDU_pipelined 的 res 在结果窗口之后就不再保持
-            //   （mul 会被下一次 start 清 mul_stb、div 的 div_hold 也会撤销），
-            //   而状态机还要多留一拍给 LSU 采样。不锁的话交接那一拍 res 已经
-            //   变成 0（实测：连除/连乘后续结果全 0）。
-            if (mdu_done_i) mdu_res_reg <= mdu_res;
+            //   （mul 会被下一次 start 清 mul_stb、div 的 div_hold 也会撤销）。
+            if (mdu_done_i) begin
+                mdu_res_reg <= mdu_res;
+                mdu_res_vld <= 1'b1;
+            end
+
+            // 这条指令被下一级收下（离开 EX）时，发射/结果标志一起清，
+            // 供**下一条** M 指令重新走一遍握手。
+            //   与上面的分支互斥：mdu_done_i 那一拍 mdu_stall=1（结果还没置位），
+            //   而这里要求 ~mdu_stall。
+            if (valid_last & ready_next & ~mdu_stall) begin
+                mdu_issued  <= 1'b0;
+                mdu_res_vld <= 1'b0;
+            end
         end
     end
 
@@ -195,7 +231,7 @@ module EXU (
             branch_pc_reg   <= 0;
             pc_out <= 0;
         end
-        else if(valid_last & ready_next & ~mdu_stall)
+        else if(valid_last & ready_next & ~mdu_stall & ~bp_pend)
         begin
             funct3_reg      <= funct3       ;
             rd_reg          <= rd;
@@ -236,7 +272,7 @@ always_ff @(posedge clock) begin
         pred_target_reg <= 0;
         pred_index_reg  <= {`BP_INDEX_BITS{1'b0}};
     end
-    else if(valid_last & ready_next & ~mdu_stall) begin
+    else if(valid_last & ready_next & ~mdu_stall & ~bp_pend) begin
         mem_ren_reg     <= mem_ren;
         csr_wen_reg     <= csr_wen;
         R_wen_reg       <= R_wen;
@@ -307,7 +343,7 @@ MDU_pipelined MDU_i0 (
     .d2    (add2_reg),
     .op    (alu_opcode_reg),
     .res   (mdu_res),
-    .busy  (mdu_busy),
+    .busy  (mdu_busy_i),
     .done  (mdu_done)
 );
 
