@@ -5,10 +5,21 @@
 #       换工艺只需替换 synth_xilinx（synth_ice40/synth_ecp5/synth_intel/...）。
 # =============================================================================
 read_verilog -sv -I. myCPU.sv
+# v9 修复：EXU 例化的是 experimental/MDU_pipelined（时序化版本），
+#   原来这里读的是 MDU.sv（保留对照用的组合版），导致
+#   `hierarchy -top myCPU -check` 直接报 Unknown module type: MDU_pipelined，
+#   脚本根本跑不完（synth_report.md 的那组数字不可能是从当前源码集来的）。
+#   另外补上 board/sync_mem.sv、board/reset_sync.sv、board/board_top.sv：
+#   上板件以前从未被任何综合脚本读过。若只想综合核本身，
+#   把 board_top 换成 myCPU 作为 -top 即可（见文件末注释）。
 read_verilog -sv -I. ALU.sv add.sv Branch_Predictor.sv Control.sv CSR.sv \
-    Data_hazard.sv DCache.sv EXU.sv ICache.sv IDU.sv IFU.sv LSU.sv MDU.sv \
-    RegisterFile.sv Reg_Stack.sv Reg.sv sext.sv WBU.sv
-hierarchy -top myCPU -check
+    Data_hazard.sv DCache.sv EXU.sv experimental/MDU_pipelined.sv ICache.sv IDU.sv \
+    IFU.sv LSU.sv RegisterFile.sv Reg_Stack.sv Reg.sv sext.sv WBU.sv
+read_verilog -sv -I. board/sync_mem.sv board/reset_sync.sv board/board_top.sv
+hierarchy -top board_top -check
 synth_xilinx -family xc7 -nosrl
 flatten
 stat
+# 只综合 CPU 核（不含板级件）时改回：
+#   read_verilog -sv -I. myCPU.sv ALU.sv ... WBU.sv
+#   hierarchy -top myCPU -check
