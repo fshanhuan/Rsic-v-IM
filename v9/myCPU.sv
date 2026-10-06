@@ -29,6 +29,10 @@ module myCPU (
 
     output [31:0] perip_addr,
     output        perip_wen,
+    // v9 修复：把数据侧的读使能引出来。板级同步 BRAM（board/sync_mem.sv）是按 ren
+    //   门控的；原来顶层没有这个端口，测试台只能用"自由运行读口"（每拍都读）来近似，
+    //   恰好把 DCache 的读握手 off-by-one 掩盖掉了（详见验证报告 B2）。
+    output        perip_ren,
     output [ 1:0] perip_mask,
     output [31:0] perip_wdata,
     input  [31:0] perip_rdata,
@@ -155,6 +159,7 @@ module myCPU (
   logic        bp_update_taken;
   logic [31:0] bp_update_target;
   logic        bp_mispredict;
+  logic        bp_hold_exu;       // v9 修复（B7）：误预测判定存在（当拍或挂起）→ 冻结 EXU 接收新指令
   logic [31:0] bp_pred_cnt;
   logic [31:0] bp_hit_cnt;
   logic [31:0] bp_miss_cnt;
@@ -243,11 +248,17 @@ assign debug_wb_value = WBU_rd_value;
   // 普通算术/地址类指令前递 EX 结果，跳转/CSR 指令前递已经准备好的 rd_value。
   logic [31:0] MEM_forward_val;
   assign MEM_forward_val = (LSU_jump_flag | (|LSU_csr_wen)) ? LSU_rd_value : LSU_Ex_result;
+
+  // v9 修复（B6）：EXU 级前递值。jump/CSR 写进 rd 的是 rd_value（link / CSR 读值），
+  //   不是 Ex_result（对 jump 那是跳转目标地址）——口径与下面 MEM 级保持一致。
+  logic [31:0] EXU_forward_val;
+  assign EXU_forward_val = (EXU_jump_flag | (|EXU_csr_wen)) ? EXU_rd_value : EXU_Ex_result;
   
   logic [31:0] LSU_Rdata_raw;
   logic [2:0] LSU_funct3;
   logic [31:0] LSU_rdata_wb_raw;
   logic [2:0] LSU_funct3_wb;
+  logic [1:0] LSU_rdata_offset_wb;   // v9 修复（B1）：写回拍 load 地址低 2 位，送给 WBU 选字节通道
   logic [15:0] LSU_csr_wen_wb;
   logic [31:0] LSU_Ex_result_wb;
   logic [31:0] LSU_rd_value_wb;
@@ -277,6 +288,7 @@ assign debug_wb_value = WBU_rd_value;
 
       .branch_pc    (EXU_branch_pc),
       .Ex_result    (EXU_Ex_result),
+      .EXU_forward_val(EXU_forward_val),
       .EXU_pc       (EXU_pc),
       .EXU_pred_taken (EXU_pred_taken),
       .EXU_pred_target(EXU_pred_target),
@@ -333,6 +345,7 @@ assign debug_wb_value = WBU_rd_value;
       .bp_update_taken(bp_update_taken),
       .bp_update_target(bp_update_target),
       .bp_mispredict (bp_mispredict),
+      .bp_hold_exu   (bp_hold_exu),
       .intr_pending  (IDU_intr_pending),
       .intr_take     (intr_take)
   );
@@ -478,7 +491,8 @@ assign debug_wb_value = WBU_rd_value;
       .valid_next(EXU_valid),
 
       .mdu_busy(EXU_mdu_busy),
-      .mdu_done(EXU_mdu_done)
+      .mdu_done(EXU_mdu_done),
+      .bp_pend (bp_hold_exu)
   );
 
   // LSU 既承担真正的访存，也承担“把可用结果尽早释放给后续级做前递”的任务。
@@ -522,6 +536,7 @@ assign debug_wb_value = WBU_rd_value;
 
       .rdata_wb_raw(LSU_rdata_wb_raw),
       .funct3_wb(LSU_funct3_wb),
+      .rdata_offset_wb(LSU_rdata_offset_wb),
       .csr_wen_wb(LSU_csr_wen_wb),
       .Ex_result_wb(LSU_Ex_result_wb),
       .rd_value_wb(LSU_rd_value_wb),
@@ -573,6 +588,8 @@ assign debug_wb_value = WBU_rd_value;
   );
 
   // WBU 是最终收束点：无论结果来自 ALU、访存还是跳转/CSR，这里统一形成最终写回值。
+  assign perip_ren = dcache_mem_en;
+
   // WBU 的 ready 恒为 1（见 WBU.sv 末），它本来就不该被暂停，因此 stall 常数接 0。
   WBU WBU_inst0 (
       .clock(cpu_clk),
@@ -580,6 +597,7 @@ assign debug_wb_value = WBU_rd_value;
 
       .MEM_Rdata_in(LSU_rdata_wb_raw),
       .funct3_in   (LSU_funct3_wb),
+      .offset_in   (LSU_rdata_offset_wb),
       .Ex_result_in(LSU_Ex_result_wb),
       .rd_value_in (LSU_rd_value_wb),
       .rd_in       (LSU_rd_wb),

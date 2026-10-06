@@ -9,6 +9,13 @@ module Control (
     input [31:0] mepc_out,
     input [31:0] branch_pc,
     input [31:0] Ex_result,
+    // v9 修复（B6）：EXU 级的前递值。
+    //   对 jump/CSR 来说，写进 rd 的是 rd_value（jal/jalr 的 link、CSR 读值），
+    //   而 Ex_result 对 jump 是**跳转目标地址**、对 CSR 是地址。原来 EXU 级前递直接
+    //   用 Ex_result，于是 `jal x4, T` 后面紧跟读 x4 的指令会拿到 T（实测：
+    //   `jal x4,0x24c` + `sw x4,...` 把 0x24c 写进了内存，应为 link 0x190）。
+    //   MEM/PIPE/WB 三级早已按这个口径处理（见 MEM_forward_val），这里补齐 EXU 级。
+    input [31:0] EXU_forward_val,
     input [31:0] EXU_pc,
     input        EXU_pred_taken,
     input [31:0] EXU_pred_target,
@@ -62,7 +69,12 @@ module Control (
     output        bp_update_en,
     output        bp_update_taken,
     output [31:0] bp_update_target,
-    output        bp_mispredict
+    output        bp_mispredict,
+    // v9 修复（B7）：误预测"已存在判定"（当拍判定或已挂起）——送给 EXU，
+    //   让它在窗口里**不接收新指令**，否则错路径指令会赶在重定向之前进入 EX 并提交。
+    //   必须包含当拍的 bp_misp_det：挂起标志是在判定那一拍的时钟沿才置位的，
+    //   只送挂起标志会晚一拍，挡不住正好在判定拍进入 EX 的那条错路径指令。
+    output logic  bp_hold_exu
 );
 
 
@@ -104,10 +116,52 @@ module Control (
     //   由它们决定冲刷；mem_stall 期间 EXU 冻结、预测校验等 hold 结束再判。
     //   EXU_ctrl_valid 同样必须参与：EXU 空（valid=0）时它的 pred_* 是残留值，
     //   不能拿来判预测错误，否则会无休止重定向。
-    logic bp_mispredict_raw;
-    assign bp_mispredict_raw = EXU_ctrl_valid & ~(intr_take | system_redirect | mem_stall) &
-                               ((actual_taken != EXU_pred_taken) ||
-                                (actual_taken && (actual_target != EXU_pred_target)));
+    // v9 修复（B4/B7）：误预测判定**只能被推后，不能被丢弃**。
+    //   原实现把 ~mem_stall 写进 raw，判定拍撞上 hold 时判定被压成 0（不是挂起），
+    //   下一拍 EXU_valid 已掉下去，这次误预测永远没人处理 —— 实测纯 ALU 后向分支
+    //   循环只跑 2 圈就掉出（loop_min）。
+    //   但也不能"去掉 ~mem_stall 直接发"：hold 期间 IFU 的 ready(=IDU_ready) 为 0，
+    //   发出去的重定向会被 IFU 丢掉（实测：dnpc_flag 打了、PC 没动）。
+    //   所以：hold 期间把判定连同**方向与目标**一起挂起，等取指侧能接收时补发一次。
+    //   同时把 bp_misp_pend 送给 EXU，让它在挂起期间**不接收新指令** —— 否则错路径
+    //   的那条会在补发前溜进 EX 并被提交（实测 rnd034：x16 被错路径的 jal 写坏）。
+    logic bp_misp_det;                       // 判定条件为真（不受 mem_stall 影响）
+    assign bp_misp_det = EXU_ctrl_valid & ~(intr_take | system_redirect) &
+                         ((actual_taken != EXU_pred_taken) ||
+                          (actual_taken && (actual_target != EXU_pred_target)));
+
+    logic        bp_misp_pend;               // 判定被 hold 挡住，等待补发
+    logic        bp_pend_taken;              // 挂起时的实际方向
+    logic [31:0] bp_pend_target;             // 挂起时的实际目标（含“不跳则 pc+4”）
+
+    // 补发脉冲：hold 结束后（~mem_stall）本拍可发；否则先挂起。
+    assign bp_mispredict_raw = (bp_misp_det | bp_misp_pend) & ~mem_stall;
+
+    // 本拍重定向用的方向/目标：**挂起值优先**。
+    //   挂起的是"更早、已经确认但没能送达 IFU"的那次误预测，必须先补发它；
+    //   否则会出现：hold 拍挂起了 jal(0xd4)→0x110，下一拍落在错路径上的
+    //   jal(0xd8)→0x128 也被判为误预测并抢走重定向（实测 rnd034）。
+    logic        bp_redir_taken;
+    logic [31:0] bp_redir_target;
+    assign bp_redir_taken  = bp_misp_pend ? bp_pend_taken  : actual_taken;
+    assign bp_redir_target = bp_misp_pend ? bp_pend_target
+                          : (actual_taken ? actual_target : (EXU_pc + 32'd4));
+
+    always_ff @(posedge clock) begin
+        if (reset) begin
+            bp_misp_pend   <= 1'b0;
+            bp_pend_taken  <= 1'b0;
+            bp_pend_target <= 32'b0;
+        end else if (bp_mispredict) begin
+            bp_misp_pend   <= 1'b0;          // 已经补发出去
+        end else if (bp_misp_det & ~bp_misp_pend) begin
+            // 本拍没能发（否则上一个分支已清）→ 挂起。
+            // 已有挂起值时不再覆盖：先来先服务，保证不丢任何一次确认的重定向。
+            bp_misp_pend   <= 1'b1;
+            bp_pend_taken  <= actual_taken;
+            bp_pend_target <= actual_taken ? actual_target : (EXU_pc + 32'd4);
+        end
+    end
 
     // v9 上板改造修正：**一次预测错误只重定向一次**。
     //   bp_mispredict 原来是电平信号，只要那条被判错的指令还停在 EXU 里就一直为 1。
@@ -115,14 +169,19 @@ module Control (
     //   于是电平信号变成“连环重定向”：每一拍都 flush，重定向目标那条指令（例：
     //   ecall）永远进不了 EXU，整机锁死 —— 实测 prog.hex 就是这样停在结尾的。
     //   加一个 pending 标志：第一次判错时给出一次重定向脉冲，之后保持静默，
-    //   直到 EXU 里那条指令离开（raw 归 0、标志清零）才允许下一次重定向。
+    //   直到这条判定彻底消失才允许下一次重定向。
+    //   v9 修复（B4）：清零条件改为“判定彻底消失”，不能再用 raw==0 —— raw 会被
+    //   mem_stall 压成 0，那样会把“还在挂起的判定”当成“没有误预测”。
     logic bp_redirect_pending;
     always_ff @(posedge clock) begin
-        if (reset)                   bp_redirect_pending <= 1'b0;
-        else if (!bp_mispredict_raw) bp_redirect_pending <= 1'b0;
-        else if (bp_mispredict)      bp_redirect_pending <= 1'b1;
+        if (reset)                               bp_redirect_pending <= 1'b0;
+        else if (bp_mispredict)                  bp_redirect_pending <= 1'b1;
+        else if (!(bp_misp_det | bp_misp_pend))  bp_redirect_pending <= 1'b0;
     end
     assign bp_mispredict = bp_mispredict_raw & ~bp_redirect_pending;
+
+    // 送给 EXU 的"暂停接收"窗口（见端口说明）
+    assign bp_hold_exu = bp_misp_det | bp_misp_pend;
 
     // 预测器在 EX 级写入：真实方向 + 真实目标
     assign bp_update_en     = EXU_valid & (branch_flag | jump_flag);
@@ -164,7 +223,18 @@ module Control (
     // 送到 IDU 的 flush 完成，不需要清 EXU 这一条。原来把 system_redirect 并进来，
     // 会在 ecall 被接收进 EXU 的同一拍把它的 csr_wen 清成 0（实测：ecall 永远不产生
     // 异常，mepc/mcause 恒为 0，程序在入口处死循环）。
-    assign EXU_inst_clear = intr_take | bp_mispredict | mem_stall | load_use_stall;
+    // v9 修复（B4）：mem_stall 期间**不能把分支/跳转指令作废**。
+    //   把 mem_stall 并进 EXU_inst_clear 的理由是"存储侧 hold 时取回的数据无效，
+    //   EX 级这条要作废重放"——那只对 load 成立。分支/跳转不依赖访存数据，把它在
+    //   这一拍清成空操作，等于**把它还没做的重定向判定一起扔掉**：
+    //   实测（loop_min 退出那次迭代）：IF 级已经按"预测跳转"取到 0x0C，而 0x14 上
+    //   那条 blt 在 EX 里被清掉（EXU_valid=0、控制位残留），它实际"不跳"这件事
+    //   再也没人判 → CPU 顺着错路径一直循环（x1 跑到 2491 而不是 10）。
+    //   现在把它留给 bp_misp_det 去判：hold 期间判定条件成立就挂起（bp_misp_pend），
+    //   等取指侧能接收（~mem_stall）时补发一次重定向。
+    assign EXU_inst_clear = intr_take | bp_mispredict
+                          | (mem_stall & ~(branch_flag | jump_flag))
+                          | load_use_stall;
     logic exu_load_use;
     logic mem_load_use;
     logic pipe_load_use;
@@ -207,21 +277,21 @@ module Control (
     //   - 预测错误：跳转用真实目标，不跳转回退到 pc+4；
     //   - 系统事件：mret 用 mepc，ecall/异常入口用 mtvec。
     assign dnpc = intr_take ? mtvec_out
-                : bp_mispredict ? (actual_taken ? actual_target : (EXU_pc + 32'd4))
+                : bp_mispredict ? bp_redir_target
                 : (mret_flag ? mepc_out : mtvec_out);
 
 
 
     // 这里把前递编码翻译成真正的数据值。
     // 可以把它看成“译码级前面的隐式旁路多路复用器”。
-    assign EXU_rs1_in = (IDU_rs1_choice == 3'b001) ? Ex_result :
+    assign EXU_rs1_in = (IDU_rs1_choice == 3'b001) ? EXU_forward_val :
                         (IDU_rs1_choice == 3'b010) ? MEM_Ex_result :
                         (IDU_rs1_choice == 3'b101) ? MEM_PIPE_Ex_result :
                         (IDU_rs1_choice == 3'b011) ? MEM2_Ex_result :
                         (IDU_rs1_choice == 3'b100) ? WB_rd_value :
                         IDU_rs1_value;
 
-    assign EXU_rs2_in = (IDU_rs2_choice == 3'b001) ? Ex_result :
+    assign EXU_rs2_in = (IDU_rs2_choice == 3'b001) ? EXU_forward_val :
                         (IDU_rs2_choice == 3'b010) ? MEM_Ex_result :
                         (IDU_rs2_choice == 3'b101) ? MEM_PIPE_Ex_result :
                         (IDU_rs2_choice == 3'b011) ? MEM2_Ex_result :
@@ -245,6 +315,7 @@ Data_hazard Data_hazard_inst (
     .IDU_valid      (IDU_valid),
     .WB_valid       (WB_valid),
     .MEM_mem_ren    (MEM_mem_ren),
+    .MEM_PIPE_mem_ren(MEM_PIPE_mem_ren),
     .EXU_R_Wen      (EXU_R_Wen),
         .EXU_mem_ren    (EXU_mem_ren),
     .MEM_R_Wen      (MEM_R_Wen),

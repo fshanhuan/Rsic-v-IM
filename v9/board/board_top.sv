@@ -87,6 +87,7 @@ module board_top #(
     logic [31:0] perip_wdata;
     logic [31:0] perip_rdata;
     logic        perip_en;
+    logic        perip_ren;
 
     myCPU u_cpu (
         .cpu_clk            (sys_clk),
@@ -97,6 +98,7 @@ module board_top #(
 
         .perip_addr         (perip_addr),
         .perip_wen          (perip_wen),
+        .perip_ren          (perip_ren),
         .perip_mask         (perip_mask),
         .perip_wdata        (perip_wdata),
         .perip_rdata        (perip_rdata),
@@ -108,10 +110,11 @@ module board_top #(
         .debug_wb_value     (debug_wb_value)
     );
 
-    // I-Cache 的读使能 / D-Cache 的读使能：myCPU 内部已经算好，这里取出来
-    // 直接接同步存储器的读口（不接也能工作，接上更贴近真实 BRAM 用法）。
+    // I-Cache 的读使能 / D-Cache 的读使能：直接接同步存储器的读口。
+    // v9 修复：数据侧读使能现在是 myCPU 的顶层端口（perip_ren），不再用层次化引用
+    //   穿进 myCPU 内部（层次化引用不可移植，综合/换工具时容易踩坑）。
     assign irom_en  = u_cpu.icache_mem_en;
-    assign perip_en = u_cpu.dcache_mem_en;
+    assign perip_en = perip_ren;
 
     /* ---------------- 3) 同步 BRAM：IROM（只读，$readmemh 固化） ---------------- */
     sync_mem #(
