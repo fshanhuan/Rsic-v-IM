@@ -1,0 +1,79 @@
+name: CI
+
+# 每次 push / PR 都跑一遍 iverilog 回归，保证"上板改造后 103/103 全过"这句话
+# 一直是真话 —— 这是多人协作时最重要的一道护栏。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 整机回归 + D-Cache 单元测试（含严格模式，不用测试台任何兜底）
+  # ---------------------------------------------------------------------------
+  regression:
+    name: iverilog 回归 (v9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 iverilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog
+          iverilog -V
+
+      - name: 全量回归（6 项整机 + 1 项单元测试）
+        working-directory: v9
+        run: bash sim/run_all.sh
+
+      - name: 上传日志（失败时用于定位）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-logs
+          path: |
+            v9/sim/build/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 2) 编译门禁：整机 + 板级顶层都必须能 -g2012 编译通过
+  #    （只把 error 当失败；iverilog 对 always_* 的 "sorry:" 提示是噪声）
+  # ---------------------------------------------------------------------------
+  compile-check:
+    name: 编译门禁 (iverilog -g2012)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 iverilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog
+
+      - name: 编译整机测试台
+        working-directory: v9
+        run: |
+          mkdir -p sim/build
+          iverilog -g2012 -o sim/build/tb_iverilog.vvp \
+            myCPU.sv IFU.sv ICache.sv Branch_Predictor.sv IDU.sv Reg_Stack.sv \
+            RegisterFile.sv CSR.sv EXU.sv ALU.sv experimental/MDU_pipelined.sv \
+            LSU.sv DCache.sv WBU.sv Data_hazard.sv Control.sv add.sv sext.sv \
+            Reg.sv sim/tb_iverilog.sv
+
+      - name: 编译板级顶层测试台
+        working-directory: v9
+        run: |
+          mkdir -p sim/build
+          iverilog -g2012 -o sim/build/tb_board.vvp \
+            board/sync_mem.sv board/reset_sync.sv board/board_top.sv \
+            myCPU.sv IFU.sv ICache.sv Branch_Predictor.sv IDU.sv Reg_Stack.sv \
+            RegisterFile.sv CSR.sv EXU.sv ALU.sv experimental/MDU_pipelined.sv \
+            LSU.sv DCache.sv WBU.sv Data_hazard.sv Control.sv add.sv sext.sv \
+            Reg.sv board/tb_board_top.sv

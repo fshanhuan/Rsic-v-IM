@@ -1,0 +1,37 @@
+# =============================================================================
+# Rsic-v-IM / .gitattributes
+# 目的：保证不管协作者用 Windows 还是 Linux，脚本换行符都正确。
+#   - *.sh / *.py / *.yml 必须是 LF，否则 Linux/macOS/CI 会把 \r 当命令的一部分
+#     （典型症状：`bash: $'\r': command not found`）
+#   - *.bat / *.cmd 必须是 CRLF
+#   - 二进制与波形不要做换行/文本转换
+# =============================================================================
+
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sv    text eol=lf
+*.v     text eol=lf
+*.vh    text eol=lf
+*.md    text eol=lf
+*.hex   text eol=lf
+*.ys    text eol=lf
+*.tcl   text eol=lf
+*.xdc   text eol=lf
+*.sdc   text eol=lf
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制 / 生成物：不做任何转换，也不在 diff / 语言统计里出现
+*.pdf   binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.vvp   binary
+# VCD / SVG 虽是纯文本，但属于仿真与渲染产物：不做换行规范化，避免无意义的 diff
+*.vcd   -text -diff linguist-generated
+*.svg   -text -diff linguist-generated

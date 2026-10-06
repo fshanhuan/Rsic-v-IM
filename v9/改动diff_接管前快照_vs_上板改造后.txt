@@ -1,0 +1,145 @@
+﻿# 本文件是 share/share/v9 改造记录的副本（生成于 2026-10-06 22:50）
+# 原始位置: share\v9_上板改造_改动diff.txt
+# 若与原始文件不一致，以原始文件为准
+# v9 接管前快照 -> 当前（上板改造后）逐行改动对照
+# 基线: share/_v9_接管快照_2025  (本次改造开始时的 v9)
+# 当前: share/v9                 (回归 103/103 全过; 严格模式同)
+# 改动文件共 6 个: 
+Control.sv, Data_hazard.sv, EXU.sv, IDU.sv, IFU.sv, myCPU.sv
+# 命名约定: 模块名/文件名/端口名零改名; 仅新增(见 docs/模块阅读文档.md 与本文档 + 行)与删除 IFU.mem_stall_r
+# 说明: ICache/DCache/LSU/RegisterFile/board/sim 的改动画在快照之前, 说明写在各自文件的中文注释里
+
+========================================================================
+### Control.sv
+========================================================================
++     output load_use_stall,
++     // branch_taken 鍙湅 EX_result[0]锛屽洜涓?EXU 宸叉妸鍚勭鍒嗘敮鏉′欢褰掍竴鍖栧埌鏈€浣庝綅銆?    // mdu_busy 鏈熼棿 EX 绾у瘎瀛樼殑鏄垰鍙戝皠鐨?M 鎸囦护锛堝叾娈嬬暀鏍囧織涓嶅彲淇★級锛?    // 鍥犳蹇欐湡涓€寰嬪睆钄藉垎鏀?璺宠浆鍒ゅ畾銆?    // **EXU_valid 蹇呴』鍙備笌闄愬畾**锛欵XU 鐨?valid 涓庡畠鐨勬帶鍒跺瘎瀛樺櫒骞朵笉鎬绘槸鍚屾
++     //   锛坴alid_last=0 鏃?EXU 涓嶆洿鏂版帶鍒跺瘎瀛樺櫒锛屽彧鎶婅嚜宸辩殑 valid 鎷変綆锛夛紝
++     //   浜庢槸浼氬嚭鐜扳€淓XU_valid=0銆佷絾 jump_flag/branch_flag/pred_* 杩樼暀鐫€涓婁竴鏉℃寚浠ょ殑鍊尖€濄€?    //   杩欎簺娈嬬暀鍊间細璁?Control 涓€鐩村垽鍑哄垎鏀?璺宠浆鍜岄娴嬮敊璇紝鏃犱紤姝㈠湴閲嶅畾鍚戯紝
++     //   鎶婇噸瀹氬悜鐩爣閭ｆ潯鎸囦护姘歌繙鍐叉帀 鈥斺€?瀹炴祴 prog.hex 灏辨槸杩欐牱鍦?jal 涔嬪悗姝诲惊鐜殑
++     //   锛圗XU_pc 鍥哄畾銆丒XU_valid 鎭?0锛岃€?dnpc_flag 鍛ㄦ湡鎬т负 1锛夈€?    logic EXU_ctrl_valid;
++     assign EXU_ctrl_valid = EXU_valid;
++     assign branch_taken = branch_flag & Ex_result[0] & ~mdu_busy & EXU_ctrl_valid;
++     assign actual_taken  = (branch_taken | jump_flag) & ~mdu_busy & EXU_ctrl_valid;
++     // v9 涓婃澘鏀归€犱慨姝ｏ細棰勬祴鏍￠獙蹇呴』璁╀綅缁欌€滄洿楂樹紭鍏堢骇銆佷笖浼氳 EX 绾ц繖鏉℃寚浠よ娓呮帀鈥濈殑浜嬩欢銆?    //   棰勬祴閿欒瑙﹀彂鐨勯噸瀹氬悜鏈韩涔熶細鎷夐珮 EXU_inst_clear锛岃€屾寚浠ゅ湪 EXU 閲屽彲鑳藉洜涓?    //   瀛樺偍渚?hold锛圗XU 琚喕缁擄紝涓€鎷嶈蛋涓嶆帀锛夎€屽仠鐣欏鎷嶏細杩欐湡闂?bp_mispredict 鑻ユ槸 1锛?    //   姣忎竴涓垰琚帴鏀剁殑鎸囦护閮戒細琚繛鐫€娓呮垚绌烘搷浣滐紝閲嶅畾鍚戠洰鏍囧張琚弽澶嶉噸鍙栵紝
++     //   鏁存満灏遍攣姝诲湪杩欓噷锛堝疄娴嬶細ecall 姘歌繙杩涗笉浜?WB锛宮epc/mcause 濮嬬粓涓?0锛夈€?    //   ecall/mret/fence.i锛坰ystem_redirect锛夊拰涓柇锛坕ntr_take锛夋湁鑷繁鐨勯噸瀹氬悜閫氶亾锛?    //   鐢卞畠浠喅瀹氬啿鍒凤紱mem_stall 鏈熼棿 EXU 鍐荤粨銆侀娴嬫牎楠岀瓑 hold 缁撴潫鍐嶅垽銆?    //   EXU_ctrl_valid 鍚屾牱蹇呴』鍙備笌锛欵XU 绌猴紙valid=0锛夋椂瀹冪殑 pred_* 鏄畫鐣欏€硷紝
++     //   涓嶈兘鎷挎潵鍒ら娴嬮敊璇紝鍚﹀垯浼氭棤浼戞閲嶅畾鍚戙€?    logic bp_mispredict_raw;
++     assign bp_mispredict_raw = EXU_ctrl_valid & ~(intr_take | system_redirect | mem_stall) &
++                                ((actual_taken != EXU_pred_taken) ||
++                                 (actual_taken && (actual_target != EXU_pred_target)));
++     // v9 涓婃澘鏀归€犱慨姝ｏ細**涓€娆￠娴嬮敊璇彧閲嶅畾鍚戜竴娆?*銆?    //   bp_mispredict 鍘熸潵鏄數骞充俊鍙凤紝鍙閭ｆ潯琚垽閿欑殑鎸囦护杩樺仠鍦?EXU 閲屽氨涓€鐩翠负 1銆?    //   涓婃澘鏀归€犲悗寮曞叆瀛樺偍渚?hold锛堝悓姝?BRAM 鍙栨寚/璁垮瓨瑕佸仠鎷嶏級锛孍XU 鍙兘琚喕浣忓ソ鍑犳媿锛?    //   浜庢槸鐢靛钩淇″彿鍙樻垚鈥滆繛鐜噸瀹氬悜鈥濓細姣忎竴鎷嶉兘 flush锛岄噸瀹氬悜鐩爣閭ｆ潯鎸囦护锛堜緥锛?    //   ecall锛夋案杩滆繘涓嶄簡 EXU锛屾暣鏈洪攣姝?鈥斺€?瀹炴祴 prog.hex 灏辨槸杩欐牱鍋滃湪缁撳熬鐨勩€?    //   鍔犱竴涓?pending 鏍囧織锛氱涓€娆″垽閿欐椂缁欏嚭涓€娆￠噸瀹氬悜鑴夊啿锛屼箣鍚庝繚鎸侀潤榛橈紝
++     //   鐩村埌 EXU 閲岄偅鏉℃寚浠ょ寮€锛坮aw 褰?0銆佹爣蹇楁竻闆讹級鎵嶅厑璁镐笅涓€娆￠噸瀹氬悜銆?    logic bp_redirect_pending;
++     always_ff @(posedge clock) begin
++         if (reset)                   bp_redirect_pending <= 1'b0;
++         else if (!bp_mispredict_raw) bp_redirect_pending <= 1'b0;
++         else if (bp_mispredict)      bp_redirect_pending <= 1'b1;
++     end
++     assign bp_mispredict = bp_mispredict_raw & ~bp_redirect_pending;
++     // EXU_inst_clear 鐨勪綔鐢ㄦ槸**鎶?EX 绾ц繖鏉℃寚浠ょ殑鎺у埗淇℃伅娓呮垚 0锛堝彉鎴愮┖鎿嶄綔锛?*锛?    // 鐢ㄤ簬涓ょ被鎯呭喌锛?    //   鈶?鐪熸鐨勫啿鍒凤細閲嶅畾鍚戯紙涓柇/棰勬祴閿欒/mret/ecall/fence.i锛夆€斺€旈敊鐨勬寚浠ゅ繀椤绘秷澶憋紱
++     //   鈶?load-use 鍐掗櫓锛欼DU 閲岄偅鏉℃秷璐硅€呮寚浠や細琚?EXU **鎻愬墠鏀惰蛋**锛坴9 鐨?valid/ready
++     //      绾﹀畾閲?EX 绾у彧鏈夊湪 valid_last=1 鏃舵墠鏇存柊瀵勫瓨鍣紝鎵€浠ユ病娉曠敤鈥滅亴姘旀场鈥濈殑鏂瑰紡
++     //      鎶婂畠鎸″湪 IDU 閲岋級锛屽畠褰撴媿鐨勬搷浣滄暟杩樻病琚墠閫掑ソ锛屽繀椤绘竻鎺夈€?    //      娉ㄦ剰 IDU 鐨勬祦姘村瘎瀛樺櫒鍦ㄦ殏鍋滄湡闂存槸鍐荤粨鐨勶紝娑堣垂鑰呬粛鐒剁暀鍦?IDU锛涙殏鍋滆В闄ゅ悗
++     //      IDU 浼氭妸瀹?*鍐嶉€佷竴娆?*缁?EXU锛岄偅涓€娆＄殑 load 宸茬粡璧板埌 LSU 绗笁绾?    //      锛坒orward_val_wb 涓婂氨鏄暟鎹級锛岀敱 Data_hazard 鐨?3'b011 姝ｇ‘鍓嶉€掋€?    //      鎵€浠モ€滆娓呮帀鐨勯偅涓€浠解€濇槸涓嶅甫浠讳綍鍓綔鐢紙R_wen/mem_wen 鍏?0锛夌殑绌烘搷浣滐紝
++     //      涓嶄細閲嶅鍐欏瘎瀛樺櫒銆佷篃涓嶄細閲嶅鍐欏唴瀛樸€?    // mem_stall锛堢紦瀛?hold锛夊悓鐞嗭細鍙栧洖鐨勬暟鎹棤鏁堬紝EX 绾ц繖涓€鏉¤浣滃簾閲嶆斁銆?    // 娉ㄦ剰杩欓噷**涓嶅惈 system_redirect**锛歟call/mret/fence.i 杩欎笁鏉?*蹇呴』鑷繁娴佸埌 WB**
++     // 锛坋call 瑕佸湪 WB 鍐?mcause/mepc锛宮ret 瑕佹仮澶?mstatus锛宖ence.i 瑕佸湪 EX 绾ф竻 ICache锛夛紝
++     // 鑰屽畠浠Е鍙戠殑閲嶅畾鍚戝彧搴旇鍐叉帀**瀹冧滑鍚庨潰**閭ｄ簺閿欒矾寰勬寚浠?鈥斺€?鍚庤€呯敱 dnpc_flag
++     // 閫佸埌 IDU 鐨?flush 瀹屾垚锛屼笉闇€瑕佹竻 EXU 杩欎竴鏉°€傚師鏉ユ妸 system_redirect 骞惰繘鏉ワ紝
++     // 浼氬湪 ecall 琚帴鏀惰繘 EXU 鐨勫悓涓€鎷嶆妸瀹冪殑 csr_wen 娓呮垚 0锛堝疄娴嬶細ecall 姘歌繙涓嶄骇鐢?    // 寮傚父锛宮epc/mcause 鎭掍负 0锛岀▼搴忓湪鍏ュ彛澶勬寰幆锛夈€?    assign EXU_inst_clear = intr_take | bp_mispredict | mem_stall | load_use_stall;
++     // load-use 鍐掗櫓鍒ゅ畾蹇呴』涓?Data_hazard 鐨勫墠閫掍徊瑁?*淇濇寔鍚屼竴鍙ｅ緞**锛?    //   鏌愪竴绾у彧鏈夊湪鈥滄暟鎹湡鐨勫彲鍓嶉€掆€濇椂鎵嶇畻瑙ｅ喅鍐掗櫓锛屽惁鍒欒鎶?IDU 鎸夊仠銆?    //   鍘熸潵鐨?exu_load_use 鏃犳潯浠舵妸鈥淓XU 閲屾槸 load鈥濆綋鍋滈】锛岃€?Data_hazard 鐨?    //   exu_hit 鍙堟棤鏉′欢浼樺厛鍙?EXU锛屼袱杈瑰彛寰勪笉涓€鑷达細娑堣垂鑰呬細琚斁琛屽埌 EXU锛?    //   鍗翠粠 EXU 鎷垮埌浜?load 鐨?*鏃у€?鍦板潃**锛堝疄娴嬶細lw 鍚庣揣璺熺殑 add 寰楀埌鍩哄潃锛夈€?    //   鐜板湪鏀规垚锛?    //     - EXU 閲屾槸 load      -> 鏁版嵁涓嶅彲鐢紝蹇呴』鍋滐紙exu_load_use锛?    //     - MEM 閲屾槸 load      -> 鏁版嵁涓嶅彲鐢紝蹇呴』鍋滐紙mem_load_use锛?    //     - MEM_PIPE 閲屾槸 load -> 鏁版嵁涓嶅彲鐢紝蹇呴』鍋滐紙pipe_load_use锛?    //     鍏朵綑鎯呭喌鏁版嵁宸插氨缁紝鐢卞墠閫掔洿鎺ョ粰鍊硷紝涓嶅啀鍋溿€?    //   鍋滈】闀垮害鍥犳鑷劧瑕嗙洊鍒?load 鏁版嵁鍙敤鐨勯偅涓€鍒伙細鏁版嵁鍙敤鐨勪笅涓€鎷?    //   涓変釜鏉′欢鍏ㄤ负 0锛屾秷璐硅€呰鏀捐骞舵嬁鍒版纭殑鍓嶉€掑€笺€?    // 涓夌骇鐨勨€滄槸涓嶆槸 load 涓?rd 涓?IDU 鐨勬簮瀵勫瓨鍣ㄧ浉鍚屸€濆垽瀹?*涓嶈兘**鍐嶄箻 IDU_valid锛?    // IDU 鍦ㄨ stall 鐨勯偅涓€鎷嶄細鎶?valid_next 鎷変綆锛堝悜涓嬫父鐏屾皵娉★級锛屽鏋滆繖閲岃姹?    // IDU_valid=1锛屾殏鍋滄潯浠朵細鍦ㄥ悓涓€鎷嶈嚜宸辨秷澶憋紝娑堣垂鑰呰鎻愬墠鏀惧嚭鍘汇€?    // 涓嶇敤 IDU_valid 涔熶笉浼氳鍒わ細IDU 绌烘椂 inst_d 鏄?NOP锛坮s1=rs2=0锛夛紝鑰岃繖閲岄兘瑕佹眰
++     // rd != 0锛孨OP 姘歌繙鍖归厤涓嶄笂锛涜鍐荤粨鐨?inst_d 淇濈暀鐨勬鏄偅鏉＄瓑寰呬腑鐨勬寚浠ょ殑婧愬瘎瀛樺櫒銆?    assign exu_load_use  = EXU_mem_ren && (((EXU_rd == IDU_rs1) || (EXU_rd == IDU_rs2)) && (EXU_rd != 0));
++     assign mem_load_use  = MEM_mem_ren && MEM_valid && (((MEM_rd == IDU_rs1) || (MEM_rd == IDU_rs2)) && (MEM_rd != 0));
++     assign pipe_load_use = MEM_PIPE_mem_ren && MEM_PIPE_valid && (((MEM_PIPE_rd == IDU_rs1) || (MEM_PIPE_rd == IDU_rs2)) && (MEM_PIPE_rd != 0));
++     // 涓夌骇涔嬪悗锛圡EM2 = LSU 绗笁绾э級load 鏁版嵁宸茬粡鍦?LSU_forward_val_wb 閲屼簡锛?    // 鐢?Data_hazard 鐨?3'b011 缂栫爜鐩存帴鍓嶉€掞紝涓嶅啀闇€瑕佹殏鍋溿€?    // mdu_busy 涔熷苟鍏ュ墠绔殏鍋滐細MDU 杩唬鏈熼棿 EX 绾т竴鐩村崰鐫€閭ｆ潯 M 鎸囦护锛?    // 鍓嶇蹇呴』鍋滀綇锛屽惁鍒欎細鎶婂悗缁寚浠ゆ帹杩涙潵瑕嗙洊瀹冦€?    // 涓よ矾鏆傚仠淇″彿锛?    //   load_use_stall 鈥斺€?鍙惈 load-use 鍐掗櫓锛堜緵 EXU 鐨勫啿鍒峰垽瀹氾紝瑙佷笅锛?    //   IFU_stall      鈥斺€?鍓嶇鎬绘殏鍋滐細鍐嶅苟鍏?mdu_busy锛屼緵 IFU 鍐荤粨 PC/鍙栨寚浣跨敤
++     assign load_use_stall = exu_load_use | mem_load_use | pipe_load_use;
++     assign IFU_stall      = load_use_stall | mdu_busy;
++         .EXU_mem_ren    (EXU_mem_ren),
++ 
+-     // branch_taken 鍙湅 EX_result[0]锛屽洜涓?EXU 宸叉妸鍚勭鍒嗘敮鏉′欢褰掍竴鍖栧埌鏈€浣庝綅銆?    // mdu_busy 鏈熼棿 EX 绾у瘎瀛樼殑鏄垰鍙戝皠鐨?M 鎸囦护锛堝叾娈嬬暀鏍囧織涓嶅彲淇★級锛?    // 鍥犳蹇欐湡涓€寰嬪睆钄藉垎鏀?璺宠浆鍒ゅ畾銆?    assign branch_taken = branch_flag & Ex_result[0] & ~mdu_busy;
+-     assign actual_taken  = (branch_taken | jump_flag) & ~mdu_busy;
+-     assign bp_mispredict = (actual_taken != EXU_pred_taken) ||
+-                            (actual_taken && (actual_target != EXU_pred_target));
+-     // EXU_inst_clear 鍙敱**鐪熸鐨勫啿鍒蜂簨浠?*鏋勬垚锛氶噸瀹氬悜锛屼互鍙婂瓨鍌ㄤ晶鍋滄媿
+-     // 锛堢紦瀛樻湭鍛戒腑鏃跺彇鍥炵殑鏄棤鏁?鍒殑鍦板潃鐨勬寚浠わ紝蹇呴』娓呮帀锛夈€?    // 娉ㄦ剰杩欓噷**鏁呮剰涓嶅惈 load-use 鏆傚仠**锛?    //   load-use 鏆傚仠鏈熼棿 IDU 閲岄偅鏉″緟鍙戞寚浠ゆ槸**蹇呴』淇濅綇鐨?*锛岄潬 ready 闃诲
+-     //   瀹冪殑鎹曡幏鍗冲彲锛涘鏋滄妸瀹冨綋鎴愬啿鍒凤紝鎺у埗瀵勫瓨鍣ㄤ細琚竻鎴?0锛屾寚浠よ櫧鐒舵祦鍒?    //   WB 鍗存病鏈変换浣曟帶鍒朵俊鎭紙瀹炴祴锛歭w 鍚庨潰绱ц窡鐨?add 鏈€鍚庡啓鍥?0锛夈€?    //   鍘熸潵鍙姞 IFU_stall锛? load-use锛夋椂涔嬫墍浠ユ病鏆撮湶锛屾槸鍥犱负閭ｆ椂 D-Cache
+-     //   璁块棶鏄?2 鎷嶃€佹殏鍋滄伆濂藉彧鏈?1 鎷嶏紝鎸囦护杩樺湪 IDU 鍐呴儴瀵勫瓨鍣ㄩ噷娌¤娓呭埌锛?    //   涓婃澘鏀归€犲悗 D-Cache 鍙樻垚 3 鎷嶏紝鏆傚仠鍙橀暱锛岃繖涓綔浼?bug 灏辨樉褰簡銆?    // 鏃у伐绋嬮噷 load-use 鍋滈】涔熻鍙備笌 EXU_inst_clear锛氬洜涓洪偅鏃?D-Cache 鍙湁
+-     // 2 鎷嶅欢杩熴€佸仠椤挎伆濂?1 鎷嶏紝娑堣垂鑰呬笉浼氳杩欐潯娓呴櫎璺緞璇激銆備笂鏉挎敼閫犲悗
+-     // D-Cache 鍙樻垚 3 鎷嶃€佸仠椤垮彉闀匡紝鑻ョ户缁妸 load-use 骞跺叆 clear锛屾帶鍒跺瘎瀛樺櫒
+-     // 浼氳鍙嶅娓?0锛屾秷璐硅€呰櫧鐒舵渶缁堟祦鍒?WB 鍗存病鏈夋帶鍒朵俊鎭€?    // 鍥犳杩欓噷鍙繚鐣?*鐪熸鐨勫啿鍒锋簮**銆侷FU_stall 浠嶇劧椹卞姩 PC 鍐荤粨涓?    // IDU 鐨?ready 闃诲锛屾殏鍋滆涔変笉鍙樸€?    assign EXU_inst_clear = intr_take | bp_mispredict | system_redirect | mem_stall;
+-     // load-use 鍐掗櫓鍒ゅ畾蹇呴』涓?Data_hazard 鐨勫墠閫掍徊瑁?*淇濇寔鍚屼竴鍙ｅ緞**锛?    //   鏌愪竴绾у彧鏈夊湪鈥滄暟鎹湡鐨勫彲鍓嶉€掆€濇椂鎵嶇畻瑙ｅ喅鍐掗櫓锛屽惁鍒欒鎶?IDU 鎸夊仠銆?    //   鍘熸潵鐨?exu_load_use 鏃犳潯浠舵妸鈥淓XU 閲屾槸 load鈥濆綋鍋滈】锛岃€?Data_hazard 鐨?    //   exu_hit 鍙堟棤鏉′欢浼樺厛鍙?EXU锛屼袱杈瑰彛寰勪笉涓€鑷达細娑堣垂鑰呬細琚斁琛屽埌 EXU锛?    //   鍗翠粠 EXU 鎷垮埌浜?load 鐨?*鏃у€?鍦板潃**锛堝疄娴嬶細lw 鍚庣揣璺熺殑 add 寰楀埌鍩哄潃锛夈€?    //   鐜板湪鏀规垚锛?    //     - EXU 閲屾槸 load      -> 鏁版嵁涓嶅彲鐢紝蹇呴』鍋滐紙exu_load_use锛?    //     - MEM 閲屾槸 load      -> 鏁版嵁涓嶅彲鐢紝蹇呴』鍋滐紙mem_load_use锛?    //     - MEM_PIPE 閲屾槸 load -> 鏁版嵁涓嶅彲鐢紝蹇呴』鍋滐紙pipe_load_use锛?    //     鍏朵綑鎯呭喌鏁版嵁宸插氨缁紝鐢卞墠閫掔洿鎺ョ粰鍊硷紝涓嶅啀鍋溿€?    //   鍋滈】闀垮害鍥犳鑷劧瑕嗙洊鍒?load 鏁版嵁鍙敤鐨勯偅涓€鍒伙細鏁版嵁鍙敤鐨勪笅涓€鎷?    //   涓変釜鏉′欢鍏ㄤ负 0锛屾秷璐硅€呰鏀捐骞舵嬁鍒版纭殑鍓嶉€掑€笺€?    assign exu_load_use  = EXU_mem_ren && (((EXU_rd == IDU_rs1) || (EXU_rd == IDU_rs2)) && (EXU_rd != 0));
+-     assign mem_load_use  = MEM_mem_ren && MEM_valid && IDU_valid && (((MEM_rd == IDU_rs1) || (MEM_rd == IDU_rs2)) && (MEM_rd != 0));
+-     assign pipe_load_use = MEM_PIPE_mem_ren && MEM_PIPE_valid && IDU_valid && (((MEM_PIPE_rd == IDU_rs1) || (MEM_PIPE_rd == IDU_rs2)) && (MEM_PIPE_rd != 0));
+-     // mdu_busy 涔熷苟鍏ュ墠绔殏鍋滐細MDU 杩唬鏈熼棿 EX 绾т竴鐩村崰鐫€閭ｆ潯 M 鎸囦护锛?    // 鍓嶇蹇呴』鍋滀綇锛屽惁鍒欎細鎶婂悗缁寚浠ゆ帹杩涙潵瑕嗙洊瀹冦€?    assign IFU_stall      = exu_load_use | mem_load_use | pipe_load_use | mdu_busy;
+
+========================================================================
+### Data_hazard.sv
+========================================================================
++   input        EXU_mem_ren,     // EXU 绾ф槸涓嶆槸 load锛堟槸鐨勮瘽褰撴媿 EX_result 鏄湴鍧€锛屼笉鑳藉綋鍓嶉€掓簮锛?    input        MEM_R_Wen,
++ //   鍚屼竴鏉℃€濊矾锛屽彧鏄師鏉ユ紡浜?EXU 杩欎竴绾с€?assign exu_hit_rs1 = EXU_R_Wen && ~EXU_mem_ren && (EXU_rd == IDU_rs1) && (EXU_rd != 0);
++ assign exu_hit_rs2 = EXU_R_Wen && ~EXU_mem_ren && (EXU_rd == IDU_rs2) && (EXU_rd != 0);
+-     input        MEM_R_Wen,
+- //   鍚屼竴鏉℃€濊矾锛屽彧鏄師鏉ユ紡浜?EXU 杩欎竴绾с€?assign exu_hit_rs1 = EXU_R_Wen && (EXU_rd == IDU_rs1) && (EXU_rd != 0);
+- assign exu_hit_rs2 = EXU_R_Wen && (EXU_rd == IDU_rs2) && (EXU_rd != 0);
+
+========================================================================
+### EXU.sv
+========================================================================
++     // 鏀捐涓嬪幓锛堢幇璞★細debug_wb_pc 瀵广€乨ebug_wb_value 閿欐垨涓?0锛夈€?    // v9 涓婃澘鏀归€犱慨姝ｏ細**涓嬫父娌″噯澶囧ソ鏃朵篃蹇呴』鍐荤粨 valid**锛垀ready_next锛夈€?    //   涓婃澘鏀归€犳妸璁垮瓨/鍙栨寚鎹㈡垚鍚屾 BRAM 鍚庡浜?mem_hold锛孡SU 浼氳鏁存潯鍐荤粨锛?    //   姝ゆ椂 ready_next(=LSU_ready) 涓?0銆傚師鏉ヨ繖涓€鎷嶄細璧板埌鏈€鍚庝竴涓?else锛?    //   鎶?valid_next 娓?0 鈥斺€?浣嗘湰绾х殑**鏁版嵁/鎺у埗瀵勫瓨鍣ㄦ槸鍐荤粨淇濇寔鐨?*
++     //   锛堝畠浠彧鍦?valid_last & ready_next 鏃舵洿鏂帮級锛屼簬鏄嚭鐜扳€減ayload 杩樺湪銆?    //   valid 宸茬粡鎺変簡鈥濈殑閿欓厤锛氳繖鏉℃寚浠ら殢鍚庤 LSU 鏀朵笅鏃?valid=0锛?    //   鍐欏洖琚?WBU 鐨?R_wen & valid 鎺愭帀 鈥斺€?瀹炴祴 lw 鍚庨潰绱ц窡鐨?add 灏辨槸杩欐牱
++     //   绠楀嚭姝ｇ‘缁撴灉 0x11 鍗村啓涓嶅洖 x7锛坸7 鎭掍负 0锛夈€?    //   鍐荤粨鍚庤涓轰笌鏁版嵁瀵勫瓨鍣ㄤ竴鑷达細hold 缁撴潫鐨勮繖涓€鎷?valid 浠嶄负 1锛屼笅娓告甯告敹涓嬨€?    always_ff @(posedge clock) begin
++         else if(mdu_stall | ~ready_next)
++             valid_next <= valid_next;           // 鍐讳綇锛圡DU 蹇?/ 涓嬫父鏈氨缁級
+-     // 鏀捐涓嬪幓锛堢幇璞★細debug_wb_pc 瀵广€乨ebug_wb_value 閿欐垨涓?0锛夈€?    always_ff @(posedge clock) begin
+-         else if(mdu_stall)
+-             valid_next <= valid_next;           // 鍐讳綇
+
+========================================================================
+### IDU.sv
+========================================================================
++     // valid_next 涓嶈窡 stall 涓€璧锋媺浣庯細v9 鐨?EXU 鍙湪 valid_last=1 鏃舵墠鏇存柊鑷繁鐨?    // 娴佹按瀵勫瓨鍣紙瑙?EXU.sv 鐨?always_ff 鏉′欢锛夛紝鎶?valid_next 鎵撴垚 0 骞朵笉浼氣€滅亴姘旀场鈥濓紝
++     // 鍙細璁?EXU 姘歌繙淇濇寔涓婁竴鏉℃寚浠?鈥斺€?瀹炴祴浼氱洿鎺ユ閿侊紙EXU 涓€鐩村崰鐫€ load锛?    // exu_load_use 姘歌繙涓?1锛夈€俵oad-use 鍐掗櫓闈?Control 鐨?EXU_inst_clear 澶勭悊锛?    // 鎻愬墠鏀惰蛋鐨勯偅涓€浠借娓呮垚绌烘搷浣滐紝鎸囦护浠嶇暀鍦?IDU锛屾殏鍋滆В闄ゅ悗鍐嶉€佷竴娆°€?    assign valid_next = valid_d;
+-     assign valid_next = valid_d;
+
+========================================================================
+### IFU.sv
+========================================================================
++     // 鍙栨寚濂戠害锛堜笂鏉挎敼閫犱慨姝ｏ級锛歷alid 蹇呴』涓庡彇鎸囨暟鎹悓鎷嶏紝浣嗕笉鑳界粍鍚堢洿閫氥€?    //   鍚屾 BRAM 鐨勫彇鎸囨槸鈥滆姹?鍝嶅簲鈥濅袱鎷嶄氦鏇跨殑锛堣 ICache.sv锛夛細hold=1 鐨勯偅鎷嶆暟鎹?    //   涓嶅彲鐢紝鍛戒腑閭ｄ竴鎷?hold=0銆傚師鏉ラ棬鎺х敤鐨勬槸**鍙堟墦浜嗕竴鎷?*鐨?mem_stall_r锛?    //   涓?inst_valid 閿欑浉锛屽疄娴?valid=1 鐨勬媿鎭板ソ閮芥挒鍦?stall=1 涓婏紝鍓嶇涓€鏉℃寚浠ら兘
++     //   浜や粯涓嶅嚭鍘伙紙琛ㄧ幇涓虹涓€娆￠噸瀹氬悜鍚?EXU_valid / LSU_valid 鎭?0锛夈€?    //   杩欓噷鏀规垚褰撴媿鍒ゅ畾锛?    //     valid <= inst_valid & ~mem_stall   锛圛Cache 鏈懡涓椂杩斿洖 `NOP 涓?hold=1锛?    //   鎵€浠ヨ寮忕瓑浠蜂簬鈥滄湰鎷嶅懡涓苟浜や粯鈥濓級銆侾C 鍐荤粨鐢?stall 璐熻矗锛屼笌 valid 鏃犲叧銆?    always_ff @(posedge clock) begin
++             valid <= inst_valid & ~mem_stall;
++     // 銆屼笅涓€鏉″湴鍧€ + 涓婁竴鏉℃寚浠ゃ€嶇殑閿欓厤缁勫悎銆?    logic advance_en;
++     assign advance_en       = valid & ready & inst_valid;
++     // jal 宸茬粡鍦?EX 绾цВ鏋愬嚭 dnpc=0x30锛屽嵈鍥犱负閭ｄ竴鎷?valid=0 鑰岃涓㈠純锛夈€?    always_ff @(posedge clock) begin
++         else if (dnpc_flag & ready & inst_valid)
++         else if (stall & valid & ready)
++         else if (advance_en)
+-     logic mem_stall_r;
+-     // 鍙栨寚濂戠害锛堜笂鏉挎敼閫狅級锛?    //   stall 宸茬粡鐢?myCPU 鎶?ICache 鐨?hold锛堟湭瀵归綈/鏈懡涓級涓庢帶鍒堕潰鐨?    //   load-use 鏆傚仠鍚堝苟杩涙潵浜嗭紝涓よ€呴兘鐢ㄦ潵**鍐荤粨 PC**銆?    //   浣?valid 鍙兘琚?*瀛樺偍渚?*鏆傚仠鍘嬩綇锛岀粷涓嶈兘琚?load-use 鏆傚仠鍘嬩綇锛?    //     load-use 鏆傚仠浼氭寔缁埌鐩稿叧 load 璧板埌鏈骇锛堝ソ鍑犳媿锛夛紝鑰?valid 鏄?    //     瀵勫瓨杈撳嚭銆佷笌 PC 宸竴鎷嶃€傜敤 load-use 鍘?gate valid 浼氳鈥滄殏鍋滅粨鏉熸椂
+-     //     閭ｄ竴鎷嶁€濈殑 valid 涓?IDU 閲囨牱鐐归敊寮€锛屾妸鏆傚仠鏈熼棿璇ヨ淇濅綇鐨勬寚浠ゅ啿鎺?    //     锛堝疄娴嬶細lw 鍚庨潰绱ц窡鐨?add 鏁存潯浠庢祦姘寸嚎娑堝け锛屽瘎瀛樺櫒鏈€鍚庢槸 0锛夈€?    //   鎵€浠ヨ繖閲屽垎鎴愪袱璺細
+-     //     mem_stall  -> 鍙備笌 valid锛堝瓨鍌ㄤ晶鏈榻?鏈懡涓偅涓€鎷嶇亴娉★級
+-     //     stall      -> 鍙喕缁?PC锛坙oad-use 鏆傚仠闈?ready 闃诲 IDU 鎹曡幏锛?    //                   涓庡師鏉?v8 鐨勮涔変竴鑷达級
+-     always_ff @(posedge clock) begin
+-             mem_stall_r <= 1'b0;
+-             mem_stall_r <= mem_stall;
+-     always_ff @(posedge clock) begin
+-         else
+-             valid <= inst_valid & ~mem_stall_r;
+-     // 銆屼笅涓€鏉″湴鍧€ + 涓婁竴鏉℃寚浠ゃ€嶇殑閿欓厤缁勫悎銆?    // pred_taken 涔熶竴璧风敤 inst_valid 闄愪綇锛歱red_taken 鏄綋鍓?IFU_pc 涓婄殑缁勫悎
+-     // 棰勬祴锛屽彧鏈夊湪杩欎竴鎷嶅畠瀵瑰簲鐨勬寚浠ょ湡鐨勮浜や粯鏃舵墠鑳芥秷璐广€?    logic advance_en;
+-     assign advance_en      = valid & ready & inst_valid;
+- 
+-     // jal 宸茬粡鍦?EX 绾цВ鏋愬嚭 dnpc=0x30锛屽嵈鍥犱负閭ｄ竴鎷?valid=0 鑰岃涓㈠純锛?    // PC 鍙嶈€岄『搴忓墠杩涗簡锛夈€?    always_ff @(posedge clock) begin
+-         if (reset) 
+-         else if (dnpc_flag & ready & inst_valid) 
+-         else if (stall & valid & ready) 
+-         else if (advance_en) 
+-     end
+- 
+
+========================================================================
+### myCPU.sv
+========================================================================
++   logic IFU_mem_stall;    // 鍙惈瀛樺偍渚?hold锛堝弬涓?IFU.valid锛?  logic IFU_stall_ctrl;   // 鏉ヨ嚜 Control锛歭oad-use 鍐掗櫓绛夊墠绔殏鍋滆姹?  logic load_use_stall;   // 鏉ヨ嚜 Control锛氬彧鍚?load-use 鍐掗櫓锛堜緵 EXU_inst_clear 浣跨敤锛涘紩鍑轰究浜庢尝褰㈣瀵燂級
++   logic icache_clr;
++       .load_use_stall (load_use_stall),      .mdu_busy       (EXU_mdu_busy),
+-   logic IFU_mem_stall;    // 鍙惈瀛樺偍渚?hold锛堝弬涓?IFU.valid锛?  logic IFU_stall_ctrl;   // 鏉ヨ嚜 Control锛歭oad-use 鍐掗櫓绛夊墠绔殏鍋滆姹?  logic icache_clr;
+-       .mdu_busy       (EXU_mdu_busy),
+

@@ -1,0 +1,14 @@
+# =============================================================================
+# BigBird v9 — 厂商无关综合与资源报告（Yosys）
+# 用法：在 v9/ 目录下执行   yosys -s syn/synth_core.ys
+# 说明：用 Xilinx 7 系列作为「代表性 FPGA」做 LUT 映射，估算 LUT/FF/DSP/BRAM。
+#       换工艺只需替换 synth_xilinx（synth_ice40/synth_ecp5/synth_intel/...）。
+# =============================================================================
+read_verilog -sv -I. myCPU.sv
+read_verilog -sv -I. ALU.sv add.sv Branch_Predictor.sv Control.sv CSR.sv \
+    Data_hazard.sv DCache.sv EXU.sv ICache.sv IDU.sv IFU.sv LSU.sv MDU.sv \
+    RegisterFile.sv Reg_Stack.sv Reg.sv sext.sv WBU.sv
+hierarchy -top myCPU -check
+synth_xilinx -family xc7 -nosrl
+flatten
+stat

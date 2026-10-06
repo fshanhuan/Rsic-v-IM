@@ -1,0 +1,67 @@
+# =============================================================================
+# Rsic-v-IM / .gitignore
+# 原则：源码、文档、约束、波形图、以及"作为证据的 VCD 与日志"入库；
+#       编译器/综合器/仿真器的中间产物一律不入库。
+# =============================================================================
+
+# ---- iverilog / vvp 构建产物 ----
+sim/build/
+*.vvp
+*.vpi
+
+# ---- verilator ----
+obj_dir/
+*.mk
+*.d
+
+# ---- Vivado / ISE ----
+.Xil/
+*.jou
+*.log
+*.str
+*.xpr
+*.xise
+*.bit
+*.bin
+*.dcp
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.sim/
+*.srcs/
+*.gen/
+*.rpt
+*.twr
+*.twx
+*.pb
+usage_statistics_webtalk.*
+
+# ---- yosys ----
+*.ys.out
+*.json
+!package.json
+
+# ---- 打包快照（v9.zip 是 v9/ 的重复打包件，不入库，避免仓库里出现"仓库的压缩包"）----
+v9.zip
+*.zip
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 注意 ----
+# wave/*.vcd 与 figures/*.svg 是**刻意入库**的：它们是模块阅读文档里引用到的
+# 可视证据（上板改造后的时序图），体积也不大（合计 < 500KB）。
+# 若要重新生成，见 v9/README.md 的「波形 / 时序图」一节。

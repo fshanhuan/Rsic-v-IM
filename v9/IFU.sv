@@ -1,0 +1,89 @@
+`timescale 1ns / 1ps
+`include "para.sv"
+
+// 取指级只做一件事：维护当前 PC，并在顺序执行、暂停、重定向之间切换。
+//
+// v9 上板改造（取指契约修正）：
+//   - valid 过去恒为 1，停拍期间取回的指令可能被后级误当成有效指令接纳。
+//     现在 valid 只在“本拍 irom_data 确实是当前 pc 的取指数据”时为 1，
+//     即 inst_valid(& ICache.fetch_align) & ~stall；停拍/未对齐的那一拍
+//     向 IDU 灌一个泡（valid=0）。这正是同步 BRAM 取指所要求的握手。
+//   - inst 在 valid=0 时输出 para.sv 的 `NOP，避免 IDU 看到无效取指数据。
+//   - PC 只在“返回结果属于当前 PC”时才推进（advance_en），否则 PC 会跑到
+//     取指数据前面，让 IDU 收到「下一条地址 + 上一条指令」的错配组合。
+//   - PC 更新里把 dnpc_flag（真实重定向）放在最前：重定向是控制面已经确认
+//     的事实，不能因为同一拍存储侧的暂停请求而丢掉；这一拍 valid 已是 0，
+//     被取回的那条指令不会被执行。
+//
+// v9 新增分支预测：
+//   - dnpc_flag 是执行级确认的真实重定向（优先级最高）；
+//   - pred_taken/pred_target 是预测器给出的“投机跳转”；
+//   - 两者都没有时才顺序取 pc+4。
+module IFU (
+    input               clock,
+    input               reset,
+    input       [31:0]  dnpc,
+    input               dnpc_flag,
+    input       [31:0]  irom_data,
+    input               stall,
+    input               mem_stall,
+    input               inst_valid,
+    input               pred_taken,
+    input       [31:0]  pred_target,
+
+    output      [31:0]  snpc,
+    output logic [31:0] pc,
+    output      [31:0]  inst,
+
+    input               ready,
+    output logic        valid
+);
+
+    localparam ResetValue = 32'h0;
+
+    assign snpc  = pc + 4;
+    assign inst  = valid ? irom_data : `NOP;
+
+    // 取指契约（上板改造修正）：valid 必须与取指数据同拍，但不能组合直通。
+    //   同步 BRAM 的取指是“请求/响应”两拍交替的（见 ICache.sv）：hold=1 的那拍数据
+    //   不可用，命中那一拍 hold=0。原来门控用的是**又打了一拍**的 mem_stall_r，
+    //   与 inst_valid 错相，实测 valid=1 的拍恰好都撞在 stall=1 上，前端一条指令都
+    //   交付不出去（表现为第一次重定向后 EXU_valid / LSU_valid 恒 0）。
+    //   这里改成当拍判定：
+    //     valid <= inst_valid & ~mem_stall   （ICache 未命中时返回 `NOP 且 hold=1，
+    //   所以该式等价于“本拍命中并交付”）。PC 冻结由 stall 负责，与 valid 无关。
+    always_ff @(posedge clock) begin
+        if (reset)
+            valid <= 1'b0;
+        else
+            valid <= inst_valid & ~mem_stall;
+    end
+
+    // 只有“返回结果确实属于当前 PC”（inst_valid = ICache.fetch_align）时，
+    // 才允许推进 PC：否则 PC 会跑到取指数据前面，使 IDU 收到
+    // 「下一条地址 + 上一条指令」的错配组合。
+    logic advance_en;
+    logic pred_taken_valid;
+    assign advance_en       = valid & ready & inst_valid;
+    assign pred_taken_valid = pred_taken & inst_valid;
+
+    // PC 更新优先级：
+    //   reset > dnpc 真实重定向 > 预测跳转 > stall 保持 > 顺序加 4。
+    // 重定向只要求 inst_valid（本拍确实交付了一条真指令），**不要求 valid**：
+    // 同步 BRAM 的取指握手会让 valid 在停拍/未对齐拍为 0，而 dnpc_flag 是
+    // 控制面已经确认的事实，用 valid 去 gate 会把它丢掉（实测踩到过：
+    // jal 已经在 EX 级解析出 dnpc=0x30，却因为那一拍 valid=0 而被丢弃）。
+    always_ff @(posedge clock) begin
+        if (reset)
+            pc <= ResetValue;
+        else if (dnpc_flag & ready & inst_valid)
+            pc <= dnpc;
+        else if (pred_taken_valid & ready)
+            pc <= pred_target;
+        else if (stall & valid & ready)
+            pc <= pc;
+        else if (advance_en)
+            pc <= snpc;
+    end
+
+endmodule
