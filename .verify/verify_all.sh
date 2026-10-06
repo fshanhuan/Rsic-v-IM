@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # verify_all.sh — 验收总脚本（修复前/后都用它，输出可直接对比）
-#   1) 官方回归        v9/sim/run_all.sh                    期望 7/7
-#   2) 板级自检        v9/board/tb_board_top.sv             期望 PASS
+#   0) 严格网络检查    .verify/netcheck.sh                 期望全 OK（无隐式网络）
+#   1) 官方回归        v9/sim/run_all.sh                    期望 15 项通过
+#   2) 板级自检        v9/board/tb_board_top.sv             期望 PASS 33/33
 #   3) 差分测试        自建夹具 vs 独立参考模型              期望全过
 #   4) 交叉验证        同一批程序喂给工程自带 tb_iverilog    期望全过
+#   另有需 Windows 侧 ModelSim 的第五道门禁（第二仿真器）：
+#       bash .verify/difftest/run_modelsim.sh 40
 # 用法: bash verify_all.sh [随机用例数]        默认 40
 # =============================================================================
 set -uo pipefail
@@ -22,8 +25,15 @@ cp -r "$SRC/v9" "$WORK/v9"
 cd "$WORK/v9" || exit 1
 mkdir -p sim/build wave
 
-RC1=1; RC2=1; RC3=1; RC4=1
+RC0=1; RC1=1; RC2=1; RC3=1; RC4=1
 
+echo "############################################################"
+echo "# 0) 严格网络检查（隐式网络 / 先用后声明）"
+echo "############################################################"
+bash "$SRC/.verify/netcheck.sh" > "$WORK/0_netcheck.log" 2>&1; RC0=$?
+grep -E '\[(OK|BAD)\]|隐式网络检查: ' "$WORK/0_netcheck.log"
+
+echo
 echo "############################################################"
 echo "# 1) 官方回归 run_all.sh"
 echo "############################################################"
@@ -65,10 +75,11 @@ echo
 echo "############################################################"
 echo "# 汇总"
 echo "############################################################"
+printf '  0) 隐式网络检查通过     : %s (rc=%d)\n' "$([ $RC0 -eq 0 ] && echo PASS || echo FAIL)" "$RC0"
 printf '  1) 官方回归 7/7         : %s (rc=%d)\n' "$([ $RC1 -eq 0 ] && echo PASS || echo FAIL)" "$RC1"
 printf '  2) 板级自检 PASS        : %s (rc=%d)\n' "$([ $RC2 -eq 0 ] && echo PASS || echo FAIL)" "$RC2"
 printf '  3) 差分测试全过         : %s (rc=%d)\n' "$([ $RC3 -eq 0 ] && echo PASS || echo FAIL)" "$RC3"
 printf '  4) 交叉验证一致         : %s (rc=%d)\n' "$([ $RC4 -eq 0 ] && echo PASS || echo FAIL)" "$RC4"
 echo "  日志目录: $WORK"
 # 只在全部通过时返回 0
-[ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && [ $RC3 -eq 0 ] && [ $RC4 -eq 0 ]
+[ $RC0 -eq 0 ] && [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ] && [ $RC3 -eq 0 ] && [ $RC4 -eq 0 ]
