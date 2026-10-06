@@ -11,13 +11,13 @@
 完整证据（原始输出、file:line 根因、复现命令）见仓库根目录
 [`验证报告_独立复核.md`](../验证报告_独立复核.md)（§2 缺陷清单、§9 第二轮修复、§10 第三轮）。
 
-## 一条命令跑完全部五道门禁
+## 一条命令跑完全部六道门禁
 
 ```bash
 bash .verify/verify_all.sh 40      # 参数=随机用例数，默认 40
 ```
 
-五道门禁（必须同时通过）：
+六道门禁（必须同时通过）：
 
 | # | 门禁 | 期望 |
 | --- | --- | --- |
@@ -26,6 +26,7 @@ bash .verify/verify_all.sh 40      # 参数=随机用例数，默认 40
 | 2 | 板级自检 `v9/board/tb_board_top.sv` | `[BOARD-SELFCHECK] status=PASS (33/33)` |
 | 3 | 差分测试（本目录） | `PASS=60 FAIL=0` |
 | 4 | 交叉验证（同一批程序喂给自带 `tb_iverilog.sv`） | `交叉验证不一致处数: 0` |
+| 5 | 综合脚本一致性 `.verify/syncheck.sh` | 4 项全 `[OK]`（清单含时序化 MDU 与板级件、elaborate 通过） |
 
 **门禁 0 是第三轮新增的，也是最便宜的一道。** 它把每个 `.sv` 顶上加
 `` `default_nettype none `` 再编译一遍，于是"未声明就使用"的标识符（隐式网络）
@@ -91,7 +92,7 @@ ModelSim vs 参考模型、iverilog vs 参考模型、两个仿真器 dump **逐
 | `difftest/reftrace.py` / `rtldiff.sh` | 参考模型的**逐指令轨迹**与 `[WB]` 事件流按指令对齐比对，直接指出第一条分歧 |
 | `difftest/mkcases.py` / `mkregress.sh` | 由参考模型算出期望值，生成并入到 `v9/sim/` 的回归程序 |
 | `showfail.sh` / `stview.sh` | 失败用例明细 / 用自带测试台的 `[ST]` 事件日志定位 store |
-| `syncheck.sh` | 按 `syn/synth_core.ys` 的文件清单编译，验证综合脚本能否 elaborate |
+| `syncheck.sh` | **综合脚本一致性检查**：从当前 `syn/synth_core.ys` 提取 `read_verilog` 清单做 elaboration（等价于 yosys `hierarchy -check`），并交叉核对 EXU 实际例化的 MDU 版本。`--legacy` 复现修复前的缺陷清单 |
 
 ## 已知但**未**修复的项（模块级，缺少整机复现）
 
