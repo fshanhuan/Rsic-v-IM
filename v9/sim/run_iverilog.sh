@@ -4,6 +4,8 @@
 # -----------------------------------------------------------------------------
 # 用法：  cd v9/sim && ./run_iverilog.sh [程序名，默认 prog]
 #            程序名 = prog | prog_mul | prog_div
+#                   | prog_load_lane | prog_load_use | prog_loop | prog_div_pair
+#                     （后 4 个是 v9 修复缺陷后补的回归）
 #
 # 产物：  sim/build/tb_iverilog.vvp
 #         sim/build/<prog>.log
@@ -40,10 +42,15 @@ cd "$DIR/.."                       # -> v9/
 mkdir -p wave sim/build
 
 case "$PROG" in
-    prog)     PROG_ID=0 ;;
-    prog_mul) PROG_ID=1 ;;
-    prog_div) PROG_ID=2 ;;
-    *)        PROG_ID=3 ;;         # 3 = 无期望值，只报实测
+    prog)           PROG_ID=0 ;;
+    prog_mul)       PROG_ID=1 ;;
+    prog_div)       PROG_ID=2 ;;
+    # v9 修复回归（专测本次修掉的缺陷）
+    prog_load_lane) PROG_ID=3 ;;
+    prog_load_use)  PROG_ID=4 ;;
+    prog_loop)      PROG_ID=5 ;;
+    prog_div_pair)  PROG_ID=6 ;;
+    *)              PROG_ID=9 ;;   # 9 = 无期望值，只报实测
 esac
 
 echo "[1/3] 编译 (iverilog -g2012)"

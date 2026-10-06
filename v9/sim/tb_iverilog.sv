@@ -33,7 +33,10 @@
 //
 // 运行时 plusarg：
 //   +prog=<path>     选择程序 hex（默认 sim/prog.hex）
-//   +prog_id=<n>     选择期望值表：0=prog 1=prog_mul 2=prog_div 其它/3=无期望值
+//   +prog_id=<n>     选择期望值表：0=prog 1=prog_mul 2=prog_div
+//                    3=prog_load_lane 4=prog_load_use 5=prog_loop 6=prog_div_pair
+//                    （3~6 是 v9 修复缺陷后补的回归，覆盖 字节/半字偏移、load 取数、
+//                      后向分支循环、背靠背除法）其它=只报实测
 //   +max=<n>         最大拍数（默认 400，防跑飞）
 //   +drain=<n>       ecall 之后再多跑几拍等流水线排空（默认 8）
 //   +no_wbu_force    关掉 WBU.stall 的 force（RTL 修好后可用）
@@ -65,7 +68,7 @@ module tb_iverilog #(
     // ---------------------------------------------------------------------
     logic [31:0] irom_addr, irom_data;
     logic [31:0] perip_addr, perip_wdata, perip_rdata;
-    logic        perip_wen;
+    logic        perip_wen, perip_ren;
     logic [ 1:0] perip_mask;
 
     logic        dbg_have_inst;
@@ -127,10 +130,16 @@ module tb_iverilog #(
         endcase
     end
 
-    // 同步读：地址打一拍，数据下一拍出（固定 1 拍延迟）
+    // 同步读：地址打一拍，数据下一拍出（固定 1 拍延迟）。
+    // v9 修复：这里必须像 board/sync_mem.sv 一样**按读使能门控**。
+    //   原来是无条件 `perip_rdata <= dram[dram_word_addr];`（自由运行读口），
+    //   每拍都更新 —— 恰好把 DCache 读握手的 off-by-one 掩盖掉了：
+    //   真实 BRAM 只在 ren=1 时采样地址、下一拍给数据，而 LSU 在数据到齐前
+    //   就已经把总线上的残留值采走了（上板表现为 x）。现在口子对齐真实语义，
+    //   测试台不再掩盖这一类问题。
     always_ff @(posedge clk) begin
-        if (rst) perip_rdata <= 32'b0;
-        else     perip_rdata <= dram[dram_word_addr];
+        if (rst)        perip_rdata <= 32'b0;
+        else if (perip_ren) perip_rdata <= dram[dram_word_addr];
     end
 
     // 同步写：上升沿按掩码合并写入
@@ -148,6 +157,7 @@ module tb_iverilog #(
         .irom_data          (irom_data),
         .perip_addr         (perip_addr),
         .perip_wen          (perip_wen),
+        .perip_ren          (perip_ren),
         .perip_mask         (perip_mask),
         .perip_wdata        (perip_wdata),
         .perip_rdata        (perip_rdata),
@@ -398,6 +408,54 @@ module tb_iverilog #(
                     exp_reg[5]  = 32'd14;
                     exp_reg[6]  = 32'd14;
                     exp_reg[7]  = 32'd14;
+                end
+                // ---- v9 修复回归：下面 4 个程序专测本次修掉的缺陷（原来完全没覆盖）----
+                // 期望值由独立参考模型（.verify/difftest）算出，不是手算。
+                3: begin   // prog_load_lane：lb/lh/lbu/lhu 的**地址偏移**选道（B1）
+                    exp_reg[1]  = 32'h0000_2000;
+                    exp_reg[2]  = 32'hddcc_bbaa;
+                    exp_reg[3]  = 32'hffff_ffaa;   // lb  offset 0
+                    exp_reg[4]  = 32'hffff_ffbb;   // lb  offset 1
+                    exp_reg[5]  = 32'hffff_ffcc;   // lb  offset 2
+                    exp_reg[6]  = 32'hffff_ffdd;   // lb  offset 3
+                    exp_reg[7]  = 32'h0000_00dd;   // lbu offset 3
+                    exp_reg[8]  = 32'h0000_00bb;   // lbu offset 1
+                    exp_reg[9]  = 32'hffff_bbaa;   // lh  offset 0
+                    exp_reg[10] = 32'hffff_ddcc;   // lh  offset 2
+                    exp_reg[11] = 32'h0000_ddcc;   // lhu offset 2
+                    exp_reg[12] = 32'h0000_bbaa;   // lhu offset 0
+                    exp_reg[13] = 32'hddcc_bbaa;   // lw
+                end
+                4: begin   // prog_load_use：load-use 冒险 + 首条/非访存后 load 的取数（B2）
+                    exp_reg[1]  = 32'h0000_2400;
+                    exp_reg[2]  = 32'h1122_3344;
+                    exp_reg[3]  = 32'h1122_3344;   // lw 紧邻非访存指令后
+                    exp_reg[4]  = 32'h2244_6688;
+                    exp_reg[5]  = 32'h1122_3344;
+                    exp_reg[6]  = 32'h0000_0044;   // lbu
+                    exp_reg[7]  = 32'h0000_0044;
+                    exp_reg[8]  = 32'h0000_1122;   // lh
+                    exp_reg[9]  = 32'h0000_1166;
+                    exp_reg[10] = 32'h1122_3344;   // lw（分支条件用它）
+                    exp_reg[11] = 32'h0000_600d;
+                    exp_reg[13] = 32'h1122_3344;   // lw → sw 数据相关（B5）
+                    exp_reg[14] = 32'h1122_3344;
+                    exp_reg[15] = 32'h2244_6688;
+                end
+                5: begin   // prog_loop：后向分支循环（B4：误预测不能被取指 hold 吞掉）
+                    exp_reg[1]  = 32'd10;          // i
+                    exp_reg[2]  = 32'h37;          // 1..10 累加 = 55
+                    exp_reg[3]  = 32'd10;          // n
+                    exp_reg[4]  = 32'h41;          // i + acc = 65
+                end
+                6: begin   // prog_div_pair：背靠背 div/rem（B3：结果与 rd 不能错位）
+                    exp_reg[1]  = 32'd100;
+                    exp_reg[2]  = 32'd7;
+                    exp_reg[3]  = 32'd14;          // 100/7
+                    exp_reg[4]  = 32'd1;           // 7/7
+                    exp_reg[5]  = 32'd15;          // 1+14
+                    exp_reg[6]  = 32'd2;           // 100%7
+                    exp_reg[7]  = 32'd17;          // 2+15
                 end
                 default: have_exp = 1'b0;   // 无现成期望值：只报实测值
             endcase

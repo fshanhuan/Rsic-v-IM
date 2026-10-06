@@ -62,6 +62,20 @@ run "严格模式"   prog     "+no_wbu_force +raw_rf"
 run "严格模式"   prog_mul "+no_wbu_force +raw_rf"
 run "严格模式"   prog_div "+no_wbu_force +raw_rf"
 
+# ---- v9 修复回归：这几条专测上板改造暴露出的缺陷，原来的 3 个程序完全没覆盖 ----
+#   3 prog_load_lane ：lb/lh/lbu/lhu 的地址偏移选道（原来永远读偏移 0）
+#   4 prog_load_use  ：load-use 冒险 + 非访存指令后的 load 取数（原来取到陈旧值/0）
+#   5 prog_loop      ：后向分支循环（原来误预测被取指 hold 吞掉，循环跑 2 圈就掉出）
+#   6 prog_div_pair  ：背靠背 div/rem（原来多拍结果与 rd 错位一条指令）
+run "回归(偏移)"  prog_load_lane
+run "回归(取数)"  prog_load_use
+run "回归(分支)"  prog_loop
+run "回归(除法)"  prog_div_pair
+run "严格模式"   prog_load_lane "+no_wbu_force +raw_rf"
+run "严格模式"   prog_load_use  "+no_wbu_force +raw_rf"
+run "严格模式"   prog_loop      "+no_wbu_force +raw_rf"
+run "严格模式"   prog_div_pair  "+no_wbu_force +raw_rf"
+
 printf '\n=== [D-Cache 单元测试] tb_dcache_unit ===\n'
 mkdir -p "$V9/sim/build"
 if (cd "$V9" && "$IVERILOG" -g2012 -o sim/build/tb_dcache_unit.vvp \

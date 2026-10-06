@@ -10,18 +10,25 @@
 
 ```bash
 cd v9
-bash sim/run_all.sh    # 7 项：prog/prog_mul/prog_div × 正常/严格模式 + D-Cache 单元测试
+bash sim/run_all.sh    # 15 项：7 个程序 × 正常/严格模式 + D-Cache 单元测试
 ```
 
 跑单个程序：
 
 ```bat
 cd v9
-sim\run_iverilog.bat               :: 跑 sim/prog.hex      （综合演示）
-sim\run_iverilog.bat prog_mul      :: 跑 sim/prog_mul.hex  （连续 8 条 mul）
-sim\run_iverilog.bat prog_div      :: 跑 sim/prog_div.hex  （连续 4 条 div）
-sim\run_iverilog.bat prog wave     :: 跑完直接开 GTKWave
+sim\run_iverilog.bat                    :: prog            （综合演示）
+sim\run_iverilog.bat prog_mul           :: 连续 8 条 mul
+sim\run_iverilog.bat prog_div           :: 连续 4 条 div
+sim\run_iverilog.bat prog_load_lane     :: 字节/半字 load 的偏移选道
+sim\run_iverilog.bat prog_load_use      :: load 取数 / load→store 数据相关
+sim\run_iverilog.bat prog_loop          :: 后向分支循环
+sim\run_iverilog.bat prog_div_pair      :: 背靠背 div/rem
+sim\run_iverilog.bat prog wave          :: 跑完直接开 GTKWave
 ```
+
+> `prog_load_lane` / `prog_load_use` / `prog_loop` / `prog_div_pair` 是第二轮独立验证
+> 发现缺陷后补的回归（原来的 3 个程序完全没有访存宽度、后向分支和多拍除法相邻的覆盖）。
 
 等价的裸命令（便于接 CI / 手工调参）：
 
@@ -48,7 +55,7 @@ vvp sim\build\tb_iverilog.vvp +prog=sim/prog.hex +prog_id=0 +vcd=wave/tb_iverilo
 | plusarg | 作用 |
 | --- | --- |
 | `+prog=<path>` | 选择程序 hex（默认 `sim/prog.hex`），相对 v9 根目录 |
-| `+prog_id=<n>` | 期望值表：`0`=prog `1`=prog_mul `2`=prog_div 其它=只报实测 |
+| `+prog_id=<n>` | 期望值表：`0`=prog `1`=prog_mul `2`=prog_div `3`=prog_load_lane `4`=prog_load_use `5`=prog_loop `6`=prog_div_pair，其它=只报实测 |
 | `+vcd=<path>` | 波形路径（默认 `wave/tb_iverilog.vcd`） |
 | `+max=<n>` | 最大拍数（默认 400，防跑飞）；超时按 FAIL 处理 |
 | `+drain=<n>` | ecall 之后再多跑几拍等流水线排空（默认 8） |
