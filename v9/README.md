@@ -7,6 +7,34 @@
 > 程序用 `$readmemh` 载入、新增 `board/`，并修掉了 4 个真实 RTL 缺陷
 > （load-use 前递拿地址、重定向连环触发、`ecall` 永不产生异常、写回被 valid 掉拍掐掉）。
 > 本机 iverilog 三程序回归 **103/103 全过**。
+>
+> **最新一轮（ModelSim + Quartus II 实测）又修掉 2 个真实缺陷，并给出资源结论**，
+> 见 [`syn/quartus_modelsim_实测.md`](./syn/quartus_modelsim_实测.md)：
+> - **B8**：`board/board_top.sv` 有 5 处**层次化引用**（`u_cpu.icache_mem_en`、
+>   `u_cpu.*_hit/miss_cnt`），而这些并不是 `myCPU` 的端口 —— 仿真器容忍、**Quartus 直接报
+>   `Error (10207)` 导致整机综合失败**；现已改为顶层端口（`myCPU.irom_en` + 4 个 `debug_*`）。
+> - **B9**：`board/sync_mem.sv` 的初始化清零循环 16384 次，越过 Quartus 的
+>   5000 次循环上限（`Error (10106)`）；现已限制为 ≤4096 次（仿真语义不变）。
+> - **ModelSim SE-64 10.5 下全量回归 15/15 全过**（7 程序 × {正常,严格} + D-Cache 单测），
+>   上板路径测试台 `tb_board_top` 也 **33/33**；`sim\run_msim.bat` 一条命令复现。
+> - **Quartus II 13.0 能用**，但必须在 `.qsf` 里加一行
+>   `VERILOG_INPUT_VERSION SYSTEMVERILOG_2005`（否则满屏 10170 语法错）。
+> - **资源**：CPU 核心 **18,815 LE / 8,995 寄存器**；整机（含 64KB DRAM）
+>   **19,175 LE / 9,268 寄存器 / 68 个 M9K / 530,688 存储位 / 201 引脚**。
+>   征途板 `EP4CE6E22C8`（6,272 LE、30 M9K、92 脚）**装不下**：
+>   逻辑 306 %、存储 192 %、引脚 218 %。缩到 EP4CE30 后逻辑/引脚都够（67 %/61 %），
+>   **只有 M9K 差 2 块（68/66）** —— 瓶颈是 64KB DRAM，不是流水线结构。
+>
+> **结构/功能不足的修复进度**见 [`syn/修复进度_C系列.md`](./syn/修复进度_C系列.md)：
+> - ✅ **C2** 前递/冒险判定收敛为单一裁决源（`Data_hazard` 成为唯一口径）
+> - ✅ **C5** `Data_hazard` 的 WB 前递补 `WB_valid`，五个前递源口径一致
+> - ✅ **C6** 清理 5 个死信号（`bp_redir_taken` / `bp_pend_taken` / `div_signed_r` /
+>   `store2_addr` / `store2_tag`），`mtval_reg` 从死寄存器变为真正登记异常现场
+> - ✅ **C7a** `mtime` 从"每拍 +1"改为可配置递减计数器（默认 1MHz 时间基准）
+> - ⚠️ **C4** 异常体系（非法指令 / 非对齐访存 / 目标非对齐 + `mtval` 落地）：
+>   判定与 CSR 登记已验证正确，但开启后会影响分支预测恢复，
+>   **由 `Control #(.TRAP_ENABLE)` 控制，默认 0**；默认配置下 **14/14 回归全过**
+> - ⏳ C1（缓存标准握手）/ C3（`EXU_inst_clear` 同步语义）/ C7b（冲 100MHz）尚未开始
 
 ## 概述
 
@@ -147,6 +175,21 @@ python sim\vcd2svg.py wave\tb_iverilog_prog_div.vcd figures\v9_postboard_prog_di
 总线行直接显示十六进制数值，指令行显示**已译码的汇编**，
 底部 `reg x1..x8` 可以看到寄存器堆逐拍被写入的过程。
 最新的 VCD 在 `wave/tb_iverilog_{prog,prog_mul,prog_div}.vcd`（逐元素 dump 了 32 个寄存器与 CSR）。
+
+## 产品说明（客户版）
+
+面向选型与采购的介绍性文档已经单独成篇，把**接口规格、性能画像、资源/选型、已知缺陷、优化路线图**
+集中在一处，适合直接发给客户或评审：
+
+| 文件 | 内容 |
+| --- | --- |
+| [`v9_处理器产品说明_客户版.docx`](./v9_处理器产品说明_客户版.docx) | **客户版产品说明（Word，15 页）**：TL;DR 选型速览、微架构总览、端口/总线/中断接口、性能与 Fmax、资源与器件选型、13 项已知缺陷（含影响与规避）、优化路线图、验证与复现、测量条件与免责声明 |
+| [`docs/产品说明_v9_客户版.md`](./docs/产品说明_v9_客户版.md) | 同一份内容的 Markdown 源（正文改这里，再跑 `docs/md2docx.py` 重新生成 Word） |
+| [`docs/v9_产品说明_预览.pdf`](./docs/v9_产品说明_预览.pdf) | 排版预览 PDF（便于快速分发与评审） |
+| [`figures/v9_arch_overview.png`](./figures/v9_arch_overview.png) | 微架构总览图（功能 5 级 / 物理 8 级 + 片外接口 + 控制通路） |
+| [`figures/v9_capacity.png`](./figures/v9_capacity.png) | 资源/容量画像（EP4CE6 与 EP4CE30 的占用对比） |
+
+重新生成：`python docs/gen_product_figs.py`（配图）→ `python docs/md2docx.py`（Word）。
 
 ## 建议阅读顺序
 
