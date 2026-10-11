@@ -26,6 +26,9 @@
 `define U1_opcode  7'b0010111   // auipc
 `define J_opcode   7'b1101111   // jal
 `define SYS_opcode 7'b1110011   // 系统：ecall/mret/CSR
+`define MISC_opcode 7'b0001111  // MISC-MEM：fence / fence.i（v9 修复 C4 新增，
+                                //   原来没有任何地方检查这个 opcode，
+                                //   于是 fence 类指令会被当成"未知 opcode"静默丢掉）
 
 /* ------------------------- R 型 funct7 区分位 ------------------------------ */
 `define funct7_base 7'b0000000     // 普通 RV32I 整数运算
@@ -105,10 +108,40 @@
 `define IRQ_MEI  11               // 机器外部中断
 // mcause：最高位 1 表示中断，0 表示异常
 `define MCAUSE_INTR_BIT 31
-`define MCAUSE_ECALL_M  11        // ecall from M-mode
+// ---- 异常（mcause 最高位为 0）----
+// v9 修复（C4）：补齐"非法/异常"这一类，并给异常入口一个统一的编码约定。
+`define MCAUSE_IADDR_MISALIGN 0     // instruction address misaligned
+`define MCAUSE_ILLEGAL_INST    2     // illegal instruction
+`define MCAUSE_BREAKPOINT      3     // breakpoint（本核未实现 ebreak，保留编码）
+`define MCAUSE_LOAD_MISALIGN   4     // load address misaligned
+`define MCAUSE_STORE_MISALIGN  6     // store/AMO address misaligned
+`define MCAUSE_ECALL_M         11    // ecall from M-mode
+// ---- 中断 ----
 `define MCAUSE_MTI      (`MCAUSE_INTR_BIT | `IRQ_MTI)
 `define MCAUSE_MSI      (`MCAUSE_INTR_BIT | `IRQ_MSI)
 `define MCAUSE_MEI      (`MCAUSE_INTR_BIT | `IRQ_MEI)
+
+/* ------------------------------ 定时器参数 -------------------------------- */
+// v9 修复（C7）：mtime 原来每拍 +1（100MHz 下 1 拍 = 10ns，即 mtime 比真实时间快
+//   约 1000 万倍），只能当"拍数计数器"用，拿来算时间/延时会离谱。
+//   现在改成**递减计数器**（decrementer）：可配置分频，mtime 按
+//   (100MHz / MTIME_DIV) 的速率递增，更接近一个时间基准。
+//   默认 100：100MHz / 100 = 1MHz，即 mtime 每 1us 加 1，肉眼可读、也好算。
+//   置 1 则退回"每拍 +1"的旧行为（回归脚本用得到）。
+`define MTIME_DIV_DEFAULT 100
+
+/* --------------------------- 异常类型编码（ID/EX 内部用） ------------------ */
+// Control 用这 4 位告诉 CSR"本拍发生的是哪种异常"，CSR 据此写 mcause/mtval。
+//   bit0 : 非法指令        (mcause=2,  mtval=faulting instruction)
+//   bit1 : load 非对齐     (mcause=4,  mtval=faulting address)
+//   bit2 : store 非对齐    (mcause=6,  mtval=faulting address)
+//   bit3 : 指令地址非对齐  (mcause=0,  mtval=faulting target)
+// ecall 不在这里（它有自己的通道，语义是"正常流到 WB 再写 CSR"）。
+`define EXC_NONE        4'b0000
+`define EXC_ILLEGAL     4'b0001
+`define EXC_LOAD_MIS    4'b0010
+`define EXC_STORE_MIS   4'b0100
+`define EXC_IADDR_MIS   4'b1000
 
 /* --------------------------- Cache / 预测器参数 ---------------------------- */
 // I-Cache：直接映射，行大小 = 1 个字（教学用，便于观察命中/缺失）

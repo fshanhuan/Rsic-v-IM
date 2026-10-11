@@ -24,6 +24,13 @@ module Reg_Stack (
     input  logic [15:0] csr_wen,
     input  logic [31:0] csrd,
 
+    // ---- v9 新增（C4）：统一异常通道，透传给 CSR ----
+    input  logic        trap_take,
+    input  logic        trap_take_q,
+    input  logic [ 3:0] trap_cause,
+    input  logic [31:0] fault_addr,
+    input  logic [31:0] fault_inst,
+
     output logic [31:0] rs1_value,
     output logic [31:0] rs2_value,
     output logic [31:0] a0_value,
@@ -37,6 +44,9 @@ module Reg_Stack (
     output logic [31:0] mscratch_out,
     output logic [31:0] mtime_out,
     output logic [31:0] mtimecmp_out,
+    // v9 新增（C4）：mtval 引出来（原来它是个死寄存器，现在真正落地了，
+    //   引到顶层供软件/测试台读取"出错指令编码 / 出错地址"）
+    output logic [31:0] mtval_out,
     output logic        intr_pending
 );
 
@@ -49,8 +59,11 @@ module Reg_Stack (
     assign wdata = (rd == 5'd0) ? 32'd0 : rd_value;
 
     // 读 CSR 时通过地址多路选择把不同系统寄存器并到统一返回口 csrs。
+    // v9 修复（C4）：补上 mtval 的读通路 —— 以前 mtval_reg 是死寄存器，
+    //   软件读 mtval 只能读到 0，异常现场无法定位。
     assign csrs = (csr_addr == `CSR_mepc)      ? mepc_out       :
                   (csr_addr == `CSR_mcause)    ? mcause_out     :
+                  (csr_addr == `CSR_mtval)     ? mtval_out      :
                   (csr_addr == `CSR_mstatus)   ? mstatus_out    :
                   (csr_addr == `CSR_mtvec)     ? mtvec_out      :
                   (csr_addr == `CSR_mie)       ? mie_out        :
@@ -69,6 +82,12 @@ module Reg_Stack (
         .ecall_flag   (ecall_flag),
         .mret_flag    (mret_flag),
         .intr_take    (intr_take),
+        // v9 新增（C4）：统一异常通道
+        .trap_take    (trap_take),
+        .trap_take_q  (trap_take_q),
+        .trap_cause   (trap_cause),
+        .fault_addr   (fault_addr),
+        .fault_inst   (fault_inst),
         .csrd         (csrd),
         .csr_wen      (csr_wen),
         .mvendorid_out(mvendorid_out),
@@ -82,6 +101,7 @@ module Reg_Stack (
         .mscratch_out (mscratch_out),
         .mtime_out    (mtime_out),
         .mtimecmp_out (mtimecmp_out),
+        .mtval_out    (mtval_out),
         .intr_pending (intr_pending)
     );
 

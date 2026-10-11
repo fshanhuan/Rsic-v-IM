@@ -65,3 +65,23 @@ venv/
 # wave/*.vcd 与 figures/*.svg 是**刻意入库**的：它们是模块阅读文档里引用到的
 # 可视证据（上板改造后的时序图），体积也不大（合计 < 500KB）。
 # 若要重新生成，见 v9/README.md 的「波形 / 时序图」一节。
+
+# ---- Quartus（综合/适配/时序的中间产物一律不入库）----
+quartus/build/db/
+quartus/build/incremental_db/
+quartus/build/output_files*/
+*.qws
+*.summary
+*.smsg
+*.pin
+*.rpt
+*.sof
+*.pof
+*.rpd
+*.jdi
+
+# ---- ModelSim（work 库与 transcript 是仿真中间产物）----
+work/
+msim/work/
+transcript
+modelsim.ini

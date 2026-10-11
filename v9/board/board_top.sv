@@ -95,6 +95,7 @@ module board_top #(
 
         .irom_addr          (irom_addr),
         .irom_data          (irom_data),
+        .irom_en            (irom_en),
 
         .perip_addr         (perip_addr),
         .perip_wen          (perip_wen),
@@ -107,13 +108,29 @@ module board_top #(
         .debug_wb_pc        (debug_wb_pc),
         .debug_wb_ena       (debug_wb_ena),
         .debug_wb_reg       (debug_wb_reg),
-        .debug_wb_value     (debug_wb_value)
+        .debug_wb_value     (debug_wb_value),
+
+        // v9 修复（B8）：四条缓存计数器走顶层端口。
+        //   原来这里是 `assign debug_icache_hit_cnt = u_cpu.icache_hit_cnt;`
+        //   这类层次化引用，Quartus 报 Error (10207) 直接综合失败。
+        .debug_icache_hit_cnt  (debug_icache_hit_cnt),
+        .debug_icache_miss_cnt (debug_icache_miss_cnt),
+        .debug_dcache_hit_cnt  (debug_dcache_hit_cnt),
+        .debug_dcache_miss_cnt (debug_dcache_miss_cnt)
     );
 
     // I-Cache 的读使能 / D-Cache 的读使能：直接接同步存储器的读口。
-    // v9 修复：数据侧读使能现在是 myCPU 的顶层端口（perip_ren），不再用层次化引用
-    //   穿进 myCPU 内部（层次化引用不可移植，综合/换工具时容易踩坑）。
-    assign irom_en  = u_cpu.icache_mem_en;
+    // v9 修复（B8）：取指侧读使能改走 myCPU 的**顶层端口** irom_en。
+    //   原来这里写的是 `assign irom_en = u_cpu.icache_mem_en;`，
+    //   而 myCPU 根本没有 icache_mem_en 这个端口 —— 它是 myCPU 的**内部信号**。
+    //   iverilog / ModelSim 容忍层次化引用，Quartus 不行：
+    //     Error (10207): Verilog HDL error at board_top.sv(116):
+    //                    can't resolve reference to object "icache_mem_en"
+    //     Error (12153): Can't elaborate top-level user hierarchy
+    //   → Analysis & Synthesis 失败，fit/时序/上板全部跑不起来。
+    //   现在与数据侧的 perip_ren 口径一致，都不再依赖层次化引用。
+    // v9 修复：数据侧读使能也是 myCPU 的顶层端口（perip_ren），
+    //   不再用层次化引用穿进 myCPU 内部（层次化引用不可移植，综合/换工具时容易踩坑）。
     assign perip_en = perip_ren;
 
     /* ---------------- 3) 同步 BRAM：IROM（只读，$readmemh 固化） ---------------- */
@@ -150,9 +167,8 @@ module board_top #(
     );
 
     /* ---------------- 5) 观测计数器引出 ---------------- */
-    assign debug_icache_hit_cnt  = u_cpu.icache_hit_cnt;
-    assign debug_icache_miss_cnt = u_cpu.icache_miss_cnt;
-    assign debug_dcache_hit_cnt  = u_cpu.dcache_hit_cnt;
-    assign debug_dcache_miss_cnt = u_cpu.dcache_miss_cnt;
+    // v9 修复（B8）：四条计数器已经在 myCPU 的端口上接好了（见上面的例化），
+    //   这里不再需要层次化引用（原来那 4 行 `u_cpu.icache_hit_cnt` 之类会让
+    //   Quartus 报 Error (10207)，整机综合失败）。
 
 endmodule

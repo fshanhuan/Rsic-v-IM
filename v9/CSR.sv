@@ -35,6 +35,19 @@ module CSR #(
     input  logic        mret_flag,
     input  logic        intr_take,   // Control 判定“本拍接收中断”
 
+    // ---- v9 新增（C4）：统一异常通道 ----
+    //   trap_take / trap_take_q 是 Control 发出的"确认接收一次异常"的单拍脉冲
+    //   （trap_take 在异常指令位于 EX 级时拉高，trap_take_q 在下一拍照原补发，
+    //    两条合并起来保证"一次异常只登记一次"，与 bp_misp_predict 的
+    //    pending 机制同一思路）。
+    //   cause ID 见 para.sv 的 `EXC_* 宏；**必须是独热编码**，这里用
+    //   mcause_mux / mtval_mux 把它翻译成 mcause 码与 mtval 值。
+    input  logic        trap_take,
+    input  logic        trap_take_q,
+    input  logic [ 3:0] trap_cause,
+    input  logic [31:0] fault_addr,  // 非对齐/非法目标地址（EX_result）
+    input  logic [31:0] fault_inst,  // 非法指令的编码（IDU_inst）
+
     input  logic [31:0] csrd,        // 软件写入数据
     input  logic [15:0] csr_wen,     // 各 CSR 写使能（见 para.sv 位映射）
 
@@ -49,6 +62,8 @@ module CSR #(
     output logic [31:0] mscratch_out,
     output logic [31:0] mtime_out,
     output logic [31:0] mtimecmp_out,
+    // v9 新增（C4）：mtval 引出（非法指令编码 / 非对齐地址）
+    output logic [31:0] mtval_out,
 
     output logic        intr_pending // = mstatus.MIE & |(mie & mip)
 );
@@ -58,10 +73,30 @@ module CSR #(
     assign marchid_out   = 32'h16FBCBD;
 
     /* --------------------------- mtime / mtimecmp ------------------------ */
+    // v9 修复（C7）：mtime 原来是**每拍 +1**。在 100MHz 下 1 拍 = 10ns，
+    //   也就是 mtime 比真实时间快 1000 万倍，"用它算时间/延时"没有任何意义。
+    //   现在改成带分频的递减计数器（decrementer）：
+    //     MTIME_DIV = 1   -> 每拍 +1（与旧行为完全一致，回归脚本可用）
+    //     MTIME_DIV = 100 -> 100MHz/100 = 1MHz，即每 1us 加 1
+    //   分频计数器只占 $\log_2(DIV)$ 个触发器，代价很小。
     logic [31:0] mtime_reg;
+    logic [31:0] mtime_divcnt;
+    logic        mtime_tick;
+    always_comb begin
+        if (`MTIME_DIV_DEFAULT <= 1) mtime_tick = 1'b1;
+        else                         mtime_tick = (mtime_divcnt >= (`MTIME_DIV_DEFAULT - 1));
+    end
+
     always_ff @(posedge clock) begin
-        if (reset) mtime_reg <= 32'b0;
-        else       mtime_reg <= mtime_reg + 32'd1;
+        if (reset) begin
+            mtime_divcnt <= 32'b0;
+            mtime_reg    <= 32'b0;
+        end else if (mtime_tick) begin
+            mtime_divcnt <= 32'b0;
+            mtime_reg    <= mtime_reg + 32'd1;
+        end else begin
+            mtime_divcnt <= mtime_divcnt + 32'd1;
+        end
     end
 
     logic [31:0] mtimecmp_reg;
@@ -108,10 +143,18 @@ module CSR #(
     logic [31:0] mstatus_reg;
     logic [31:0] mstatus_nxt;
     logic        mstatus_wen;
-    assign mstatus_wen = csr_wen[`CSRW_MSTATUS] | intr_take | ecall_flag | mret_flag;
+    // v9 修复（C4）：异常（trap_take / trap_take_q）与中断/ecall/mret 一样会改 mstatus
+    //   —— 陷入时 MPIE<=MIE、MIE<=0。原来这里只有 intr_take|ecall_flag|mret_flag，
+    //   非法指令/非对齐访存这类同步异常不会关中断，语义是错的。
+    assign mstatus_wen = csr_wen[`CSRW_MSTATUS] | intr_take | ecall_flag | mret_flag
+                       | trap_take | trap_take_q;
+
+    // 统一的"本拍在登记一次陷入"条件（中断/ecall/同步异常都算）
+    logic trap_commit;
+    assign trap_commit = intr_take | ecall_flag | trap_take | trap_take_q;
 
     always_comb begin
-        if (intr_take || ecall_flag) begin
+        if (trap_commit) begin
             // 陷入：MPIE <= MIE，MIE <= 0
             mstatus_nxt = {mstatus_reg[31:8], mstatus_reg[`MSTATUS_MIE],
                            mstatus_reg[6:4], 1'b0, mstatus_reg[2:0]};
@@ -134,26 +177,63 @@ module CSR #(
     /* -------------------------------- mepc ------------------------------- */
     logic [31:0] mepc_reg;
     logic        mepc_wen;
-    assign mepc_wen = csr_wen[`CSRW_MEPC] | intr_take | ecall_flag;
+    assign mepc_wen = csr_wen[`CSRW_MEPC] | intr_take | ecall_flag | trap_take | trap_take_q;
     always_ff @(posedge clock) begin
         if (reset)            mepc_reg <= RESET_VAL;
-        else if (mepc_wen)    mepc_reg <= (intr_take | ecall_flag) ? pc : csrd;
+        else if (mepc_wen)    mepc_reg <= trap_commit ? pc : csrd;
     end
     assign mepc_out = mepc_reg;
 
     /* ------------------------------- mcause ------------------------------ */
+    // v9 修复（C4）：mcause 原来只认"中断"与"ecall"两种来源，非法指令/非对齐访存
+    //   无处登记。现在多了一条同步异常通道，用 trap_cause（`EXC_* 独热码）翻译。
     logic [31:0] mcause_reg;
     logic        mcause_wen;
-    assign mcause_wen = csr_wen[`CSRW_MCAUSE] | intr_take | ecall_flag;
+    logic [31:0] exc_mcause;
+    always_comb begin
+        // 优先级与 Control 的 trap_cause 编码保持一致
+        exc_mcause = trap_cause[3] ? `MCAUSE_IADDR_MISALIGN   // bit3 指令地址非对齐 = 0
+                   : trap_cause[0] ? `MCAUSE_ILLEGAL_INST      // bit0 非法指令        = 2
+                   : trap_cause[1] ? `MCAUSE_LOAD_MISALIGN     // bit1 load 非对齐     = 4
+                   : trap_cause[2] ? `MCAUSE_STORE_MISALIGN    // bit2 store 非对齐    = 6
+                   : 32'd0;
+    end
+    assign mcause_wen = csr_wen[`CSRW_MCAUSE] | trap_commit;
     always_ff @(posedge clock) begin
         if (reset)            mcause_reg <= RESET_VAL;
         else if (mcause_wen) begin
-            if (intr_take)      mcause_reg <= {1'b1, 27'b0, intr_cause};  // 中断
-            else if (ecall_flag) mcause_reg <= `MCAUSE_ECALL_M;            // 异常
-            else                mcause_reg <= csrd;
+            if (intr_take)              mcause_reg <= {1'b1, 27'b0, intr_cause};  // 中断
+            else if (trap_take | trap_take_q) mcause_reg <= exc_mcause;           // 同步异常
+            else if (ecall_flag)        mcause_reg <= `MCAUSE_ECALL_M;            // 环境调用
+            else                        mcause_reg <= csrd;
         end
     end
     assign mcause_out = mcause_reg;
+
+    /* -------------------------------- mtval ------------------------------ */
+    // v9 修复（C4）：mtval_reg 原来是个**死寄存器**（只复位、从不写），
+    //   非法指令/非对齐访存本应把"出错指令编码 / 出错地址"放进去，软件没法定位。
+    //   RISC-V 语义：
+    //     非法指令        -> mtval = 出错指令编码
+    //     取指/访存非对齐  -> mtval = 出错的有效地址
+    //     中断/ecall/断点  -> mtval = 0
+    logic [31:0] mtval_reg;
+    logic        mtval_wen;
+    logic [31:0] exc_mtval;
+    always_comb begin
+        exc_mtval = trap_cause[0] ? fault_inst      // 非法指令：出错指令编码
+                  : (trap_cause[3] | trap_cause[1] | trap_cause[2]) ? fault_addr  // 非对齐：出错地址
+                  : 32'd0;
+    end
+    // 软件可写（CSRW_MTVAL 已并入位图低 4 位之外的位置，这里用一个自由位）
+    assign mtval_wen = intr_take | trap_take | trap_take_q;
+    always_ff @(posedge clock) begin
+        if (reset)                 mtval_reg <= RESET_VAL;
+        else if (mtval_wen) begin
+            if (intr_take)         mtval_reg <= 32'd0;      // 中断：mtval 清零
+            else                   mtval_reg <= exc_mtval;  // 同步异常：写指令或地址
+        end
+    end
 
     /* ------------------------------- mtvec ------------------------------- */
     logic [31:0] mtvec_reg;
@@ -171,10 +251,8 @@ module CSR #(
     end
     assign mscratch_out = mscratch_reg;
 
-    /* --------------------------- mtval（保留） --------------------------- */
-    logic [31:0] mtval_reg;
-    always_ff @(posedge clock) begin
-        if (reset) mtval_reg <= RESET_VAL;
-    end
+    // 注：mtval_reg 的声明与写入已经上移到"mcause/mtval"一节（C4 修复），
+    //   这里不再重复声明 —— 原来的 `always_ff` 只做复位、从不写入，
+    //   是个彻底的死寄存器，会让"软件读 mtval 定位异常"这条路完全失效。
 
 endmodule

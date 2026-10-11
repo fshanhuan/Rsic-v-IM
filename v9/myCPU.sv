@@ -26,6 +26,14 @@ module myCPU (
 
     output [31:0] irom_addr,
     input  [31:0] irom_data,
+    // v9 修复（B8）：把取指侧的存储器**读使能**引出来。
+    //   board/board_top.sv 原来是靠层次化引用 `u_cpu.icache_mem_en` 拿这个信号的，
+    //   但 myCPU 根本没有这个端口 —— 层次化引用在 iverilog / ModelSim 下能过，
+    //   真实综合工具会直接拒绝：
+    //     Quartus II: Error (10207): can't resolve reference to object "icache_mem_en"
+    //   结果就是**整机上不了板**（Analysis & Synthesis 失败，后续 fit 全部跑不起来）。
+    //   这与 perip_ren（数据侧，2022 年那次修复）是同一个问题，这里补齐取指侧。
+    output        irom_en,
 
     output [31:0] perip_addr,
     output        perip_wen,
@@ -41,7 +49,27 @@ module myCPU (
     output  logic [31:0] debug_wb_pc,
     output  logic debug_wb_ena,
     output  logic [4:0] debug_wb_reg,
-    output  logic [31:0] debug_wb_value
+    output  logic [31:0] debug_wb_value,
+
+    // v9 修复（B8）：四条缓存命中/缺失计数器引到顶层。
+    //   原来 board/board_top.sv 直接用层次化引用 `u_cpu.icache_hit_cnt` 等取它们，
+    //   而 myCPU 没有这些端口 —— 与 irom_en 是同一类问题，Quartus 报
+    //     Error (10207): can't resolve reference to object "icache_hit_cnt"
+    //   导致 Analysis & Synthesis 失败、整机上不了板。
+    //   这四条只用于板上观察（数码管/UART/逻辑分析仪），不参与任何控制逻辑。
+    output  logic [31:0] debug_icache_hit_cnt,
+    output  logic [31:0] debug_icache_miss_cnt,
+    output  logic [31:0] debug_dcache_hit_cnt,
+    output  logic [31:0] debug_dcache_miss_cnt,
+
+    // v9 新增（C4）：异常现场观察口。
+    //   异常体系（非法指令 / 非对齐访存 / ecall / 中断）的登记结果引到顶层，
+    //   方便板上观察与仿真断言 —— 原来 mepc/mcause 只能靠层次化引用去看，
+    //   而 mtval 根本是个死寄存器。
+    output  logic [31:0] debug_mcause,
+    output  logic [31:0] debug_mepc,
+    output  logic [31:0] debug_mtval,
+    output  logic        debug_trap_take
 
 );
 
@@ -181,6 +209,23 @@ module myCPU (
   logic        IDU_intr_pending;   // 来自 CSR：中断待处理且全局使能
   logic        intr_take;          // Control 判定本拍接收中断
 
+  /* ---------- v9 新增（C4）：异常体系信号 ---------- */
+  logic        IDU_illegal_flag;      // ID 级指令非法
+  logic        IDU_mem_misalign;      // load/store 有效地址非对齐
+  logic [2:0]  IDU_mem_misalign_funct3;
+  logic        EXU_illegal_exc;       // EX 级锁存后的非法指令异常
+  logic        EXU_mem_misalign_exc;
+  logic [2:0]  EXU_mem_misalign_funct3;
+  logic        EXU_iaddr_misalign_exc;
+  logic [31:0] EXU_fault_inst;        // 出错指令编码（写 mtval 用）
+  logic        trap_take;             // 确认接收一次同步异常（单拍）
+  logic        trap_take_q;           // 下一拍补发重定向
+  logic [3:0]  trap_cause;            // `EXC_* 独热码
+  logic [31:0] fault_addr, fault_inst;
+  logic        exc_pending;
+  logic [31:0] IDU_mtval_out;         // 供顶层 debug 端口观察
+  logic [31:0] IDU_mcause_out;        // 异常/中断原因码观察
+
   /* ---------- v9 新增：I-Cache / D-Cache 观测信号（可在波形中查看命中率） ---------- */
   logic [31:0] icache_rdata;
   logic        icache_hit;
@@ -225,6 +270,18 @@ assign debug_wb_pc = WBU_pc;
 assign debug_wb_ena = WBU_R_wen;
 assign debug_wb_reg = WBU_rd;
 assign debug_wb_value = WBU_rd_value;
+
+// v9 修复（B8）：缓存计数器走顶层端口（原来是 board_top 的层次化引用，综合不认）。
+assign debug_icache_hit_cnt  = icache_hit_cnt;
+assign debug_icache_miss_cnt = icache_miss_cnt;
+assign debug_dcache_hit_cnt  = dcache_hit_cnt;
+assign debug_dcache_miss_cnt = dcache_miss_cnt;
+
+// v9 新增（C4）：异常现场观察口（mcause / mepc / mtval / trap_take）
+assign debug_mcause    = IDU_mcause_out;
+assign debug_mepc      = IDU_mepc_out;
+assign debug_mtval     = IDU_mtval_out;
+assign debug_trap_take = trap_take;
 
 
   IFU IFU_Inst0 (
@@ -350,7 +407,20 @@ assign debug_wb_value = WBU_rd_value;
       .bp_mispredict (bp_mispredict),
       .bp_hold_exu   (bp_hold_exu),
       .intr_pending  (IDU_intr_pending),
-      .intr_take     (intr_take)
+      .intr_take     (intr_take),
+
+      // v9 新增（C4）：同步异常通道
+      .EXU_illegal_exc          (EXU_illegal_exc),
+      .EXU_mem_misalign_exc     (EXU_mem_misalign_exc),
+      .EXU_mem_misalign_funct3  (EXU_mem_misalign_funct3),
+      .EXU_iaddr_misalign_exc   (EXU_iaddr_misalign_exc),
+      .EXU_fault_inst           (EXU_fault_inst),
+      .trap_take                (trap_take),
+      .trap_take_q              (trap_take_q),
+      .trap_cause               (trap_cause),
+      .fault_addr               (fault_addr),
+      .fault_inst               (fault_inst),
+      .exc_pending              (exc_pending)
   );
 
   // 分支预测器：IF 级查询、EX 级更新。
@@ -425,6 +495,12 @@ assign debug_wb_value = WBU_rd_value;
       .rs1      (IDU_rs1),
       .rs2      (IDU_rs2),
       .a0_value (IDU_a0_value),
+      // v9 新增（C4）：异常判定结果 + mtval / mtvec 观察口
+      .illegal_flag          (IDU_illegal_flag),
+      .mem_misalign          (IDU_mem_misalign),
+      .mem_misalign_funct3   (IDU_mem_misalign_funct3),
+      .mtval_out             (IDU_mtval_out),
+      .mcause_out            (IDU_mcause_out),
       .mepc_out (IDU_mepc_out),
       .mtvec_out(IDU_mtvec_out),
       .pred_taken (IDU_pred_taken),
@@ -436,7 +512,18 @@ assign debug_wb_value = WBU_rd_value;
       .ready_last(IDU_ready),
 
       .ready_next(EXU_ready),
-      .valid_next(IDU_valid)
+      .valid_next(IDU_valid),
+
+      // v9 新增（C4）：同步异常通道（Control → IDU → Reg_Stack/CSR）。
+      //   **这五个端口漏接会让 CSR 完全收不到异常**：trap_take/trap_cause
+      //   悬空成 x，mcause/mtval 永远写不进去 —— 实测现象是"陷入次数对、
+      //   但 mcause 恒 0、mtval 恒 x"。vsim 只会给一个 vopt-2718 Missing
+      //   connection 的 Warning，很容易被忽略，所以这里显式列出。
+      .trap_take   (trap_take),
+      .trap_take_q (trap_take_q),
+      .trap_cause  (trap_cause),
+      .fault_addr  (fault_addr),
+      .fault_inst  (fault_inst)
 
   );
 
@@ -495,7 +582,21 @@ assign debug_wb_value = WBU_rd_value;
 
       .mdu_busy(EXU_mdu_busy),
       .mdu_done(EXU_mdu_done),
-      .bp_pend (bp_hold_exu)
+      .bp_pend (bp_hold_exu),
+      // v9 新增（C4）：异常确认脉冲（只清异常标志，不参与 EXU_inst_clr）
+      .trap_take (trap_take),
+
+      // v9 新增（C4）：异常输入（来自 IDU，与 IDU_* 控制位同拍）
+      .illegal_in               (IDU_illegal_flag),
+      .mem_misalign_in          (IDU_mem_misalign),
+      .mem_misalign_funct3_in   (IDU_mem_misalign_funct3),
+      .fault_inst_in            (IDU_inst),
+      // v9 新增（C4）：异常输出（锁存后与 EX 级指令一一对应）
+      .illegal_exc              (EXU_illegal_exc),
+      .mem_misalign_exc         (EXU_mem_misalign_exc),
+      .mem_misalign_funct3_exc  (EXU_mem_misalign_funct3),
+      .iaddr_misalign_exc       (EXU_iaddr_misalign_exc),
+      .fault_inst_exc           (EXU_fault_inst)
   );
 
   // LSU 既承担真正的访存，也承担“把可用结果尽早释放给后续级做前递”的任务。
@@ -592,6 +693,12 @@ assign debug_wb_value = WBU_rd_value;
 
   // WBU 是最终收束点：无论结果来自 ALU、访存还是跳转/CSR，这里统一形成最终写回值。
   assign perip_ren = dcache_mem_en;
+
+  // v9 修复（B8）：取指侧读使能引出（原来是 board_top 里的层次化引用，综合不认）。
+  //   irom_en 就是 ICache 的 mem_en：只在“本拍确实要向 IROM 发一次读”时为 1。
+  //   注：ICache 内部 cpu_en_r 上电后恒为 1，所以这个信号实际上一直为 1；
+  //   仍然显式引出，是为了不再依赖层次化引用，并给 SoC 侧留出按 ren 门控的余地。
+  assign irom_en = icache_mem_en;
 
   // WBU 的 ready 恒为 1（见 WBU.sv 末），它本来就不该被暂停，因此 stall 常数接 0。
   WBU WBU_inst0 (

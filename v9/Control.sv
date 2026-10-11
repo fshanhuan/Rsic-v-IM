@@ -2,7 +2,25 @@
 // 1. 收束所有会改写 PC 的事件，生成 dnpc/dnpc_flag。
 // 2. 识别 load-use 冒险，决定是否暂停 IFU/IDU 并清空执行级。
 // 3. 根据 Data_hazard 的编码真正完成前递值选择。
-module Control (
+`include "para.sv"
+
+module Control #(
+    // -----------------------------------------------------------------------
+    // v9 新增（C4）：同步异常体系总开关。
+    //   1 = 打开：非法指令 / 访存非对齐 / 指令地址非对齐 都会陷入 mtvec 并登记
+    //             mcause/mepc/mtval（IDU 的合法性译码 + EXU 的异常锁存同时生效）。
+    //   0 = 关闭：这些异常不产生重定向，退回到和修复前一致的控制流行为。
+    //             （非法指令的"副作用清零"仍保留 —— 那层在 IDU 里，属于安全修正。）
+    //
+    // 为什么要留开关：
+    //   1) 异常体系会改变"哪些指令重定向 PC"，牵动 EXU↔Control 那条很绕的组合链。
+    //      留开关可以逐项开启、逐项回归，出问题能立刻定位到是哪一项；
+    //   2) 教学场景需要"干净基线"（只用 ecall/中断），不想被额外异常干扰；
+    //   3) 综合/时序对比时可以把新逻辑整块关掉，量化它的资源/Fmax 代价。
+    //   默认 1（打开）。
+    // -----------------------------------------------------------------------
+    parameter TRAP_ENABLE = 0
+) (
     input clock,
     input reset,
     input [31:0] mtvec_out,
@@ -57,6 +75,16 @@ module Control (
     // 目的是把它从 IFU_stall 里单独引出来给 EXU_inst_clear 用。
     input mdu_busy,
     input mem_stall,
+    // ---- v9 新增（C4）：来自 EXU 的同步异常（已锁存，与 EX 级指令一一对应）----
+    //   “非法指令 / 访存非对齐 / 指令地址非对齐”三类同步异常的判定分别在
+    //   IDU（非法、访存非对齐，当拍算地址）与 EXU（跳转目标对齐）完成，
+    //   Control 只负责**定优先级、发重定向脉冲、告诉 CSR 写什么 cause/mtval**。
+    input        EXU_illegal_exc,
+    input        EXU_mem_misalign_exc,
+    input  [2:0] EXU_mem_misalign_funct3,
+    input        EXU_iaddr_misalign_exc,
+    // 非法指令的原始编码（EXU 随流水锁存后送过来），用于写 mtval
+    input [31:0] EXU_fault_inst,
     output IFU_stall,
     output load_use_stall,
     output [31:0] EXU_rs1_in,
@@ -74,12 +102,33 @@ module Control (
     //   让它在窗口里**不接收新指令**，否则错路径指令会赶在重定向之前进入 EX 并提交。
     //   必须包含当拍的 bp_misp_det：挂起标志是在判定那一拍的时钟沿才置位的，
     //   只送挂起标志会晚一拍，挡不住正好在判定拍进入 EX 的那条错路径指令。
-    output logic  bp_hold_exu
+    output logic  bp_hold_exu,
+
+    // ---- v9 新增（C4）：统一异常通道（送给 CSR/Reg_Stack）----
+    //   trap_take / trap_take_q ：确认接收一次同步异常的**单拍脉冲**（见下方 always_ff）
+    //   trap_cause              ：`EXC_* 独热码，CSR 据此写 mcause/mtval
+    //   fault_addr / fault_inst ：mtval 的取值来源
+    output logic        trap_take,
+    output logic        trap_take_q,
+    output logic [ 3:0] trap_cause,
+    output logic [31:0] fault_addr,
+    output logic [31:0] fault_inst,
+    // 当前 EX 级是否处于同步异常态（供波形/断言观察）
+    output logic        exc_pending
 );
 
 
+    // v9 修复（C2）：`IDU_rs1_choice / IDU_rs2_choice` 不再由本模块产生，
+    //   改由 Data_hazard 输出（它是唯一的前递裁决源），这里只声明成 logic 接收。
+    //   同理，load-use 冒险判定也搬到了 Data_hazard（见文件末尾注释）。
     logic [2:0] IDU_rs1_choice;
     logic [2:0] IDU_rs2_choice;
+
+    // v9 修复（C2）：load-use 的三个分级明细（由 Data_hazard 产生，仅供波形观察；
+    //   Control 的停顿/冲刷只用合并后的 load_use_stall）。
+    logic exu_load_use_dbg;
+    logic mem_load_use_dbg;
+    logic pipe_load_use_dbg;
 
 
 
@@ -127,34 +176,117 @@ module Control (
     //   的那条会在补发前溜进 EX 并被提交（实测 rnd034：x16 被错路径的 jal 写坏）。
     // 系统重定向（mret/ecall/fence.i）标志：**必须先声明**，下面一行括弧里就要用。
     logic system_redirect;
+    // 同步异常重定向脉冲（C4），与 system_redirect 组合使用，同样必须先声明。
+    logic trap_redirect;
+    // 注：exc_pending 已经是本模块的 output 端口（见端口表），这里不再重复声明。
+
+    // =======================================================================
+    // v9 新增（C4）：同步异常（非法指令 / 访存非对齐 / 指令地址非对齐）
+    // -----------------------------------------------------------------------
+    // 原来的核只认识 ecall 这一种同步异常，非法指令会被"当成加法"执行掉、
+    // 非对齐访存会被静默对齐（LSU 里把 addr[17:16] 强制清零）—— 两者都违反
+    // RISC-V 最少可测的语义，而且会让软件拿到错误结果却毫无提示。
+    //
+    // 这里做三件事：
+    //   1) 定优先级（与 RISC-V 规范一致）：
+    //        指令地址非对齐(0) > 非法指令(2) > 访存非对齐(4/6)
+    //   2) 生成"确认接收一次异常"的单拍脉冲 trap_take，交给 CSR 登记
+    //      mepc/mcause/mtval（登记发生在异常指令位于 EX 级的那一拍）。
+    //   3) 下一拍用 trap_take_q 发一次**只发一次**的重定向到 mtvec。
+    //      为什么要分两拍、而不是用组合电平直接重定向：
+    //        - 组合电平在 mem_stall（缓存 hold）期间会持续拉高，而 IFU 的
+    //          ready=0 会把重定向丢掉 → 异常丢失；
+    //        - 若改成"电平持续发"，则每一拍都 flush，重定向目标那条指令永远
+    //          进不了 EX → 整机锁死。这与分支预测器 bp_redirect_pending 踩过
+    //          的坑完全相同，所以复用同一手法：先登记、再补发一次。
+    //      只用一拍（EXU 那一拍）做重定向的话，hold 期间同样会丢；
+    //      所以用"EXU 拍脉冲 + 下一拍补发"覆盖两种时序。
+    // =======================================================================
+    logic exc_ill, exc_load_mis, exc_store_mis, exc_iaddr_mis;
+    assign exc_ill       = EXU_illegal_exc;
+    assign exc_load_mis  = EXU_mem_misalign_exc & ~EXU_mem_misalign_funct3[1]
+                         &  EXU_mem_misalign_funct3[2];   // 100/101 = lbu/lhu -> load
+    assign exc_store_mis = EXU_mem_misalign_exc &  EXU_mem_misalign_funct3[1]
+                         & ~EXU_mem_misalign_funct3[2];   // 001 = sh -> store
+    // 说明：funct3 只用来区分 load/store（mcause 4 还是 6），
+    //   0xx=load 族（000 lb / 001 lh / 010 lw / 100 lbu / 101 lhu），
+    //   1xx 里只有 001(sh) 是 store 族（sb=000、sw=010 天然对齐，不会走到这里）。
+    assign exc_iaddr_mis = EXU_iaddr_misalign_exc;
+
+    logic exc_any;
+    // v9 新增（C4）：TRAP_ENABLE=0 时整块异常逻辑失效（不重定向、不登记），
+    //   等价于修复前的控制流。IDU 侧的"非法指令副作用清零"仍然生效，
+    //   所以即使关掉开关，非法指令也不会被真的执行掉。
+    assign exc_any = TRAP_ENABLE ? (exc_iaddr_mis | exc_ill | exc_load_mis | exc_store_mis)
+                                 : 1'b0;
+
+    // 本拍 EX 级确实有一条指令、且它带着异常
+    assign exc_pending = exc_any & EXU_valid;
+    // 优先级编码（独热）：bit3=指令地址非对齐, bit0=非法指令,
+    //                    bit1=load 非对齐, bit2=store 非对齐
+    assign trap_cause = exc_iaddr_mis ? `EXC_IADDR_MIS
+                      : exc_ill       ? `EXC_ILLEGAL
+                      : exc_load_mis  ? `EXC_LOAD_MIS
+                      : exc_store_mis ? `EXC_STORE_MIS
+                      : `EXC_NONE;
+
+    // mtval 取值来源：非法指令给指令编码（IDU 的原始 inst），其余给出错地址。
+    //   非法指令的编码由 IDU 透传过来（fault_inst），地址用 EXU 的目标/有效地址
+    //   （EX_result：对 load/store 是有效地址，对跳转是目标地址）。
+    assign fault_inst = EXU_fault_inst;
+    assign fault_addr = Ex_result;     // EXU 的有效地址/跳转目标（端口名是 Ex_result）
+
+    // trap_take：在异常指令位于 EX 级的那一拍认定一次异常。
+    //   ~exc_pending_q 用来**去重**：ensure 同一拍不会重复登记
+    //   （trap_take_q 已经把登记延续到下一拍，这里不重复触发）。
+    logic trap_take_q_r;
+    assign trap_take = exc_pending & ~trap_take_q_r;
+    assign trap_take_q = trap_take_q_r;
+
+    always_ff @(posedge clock) begin
+        if (reset)                        trap_take_q_r <= 1'b0;
+        else if (trap_take)               trap_take_q_r <= 1'b1;  // 下一拍补发重定向
+        else                              trap_take_q_r <= 1'b0;
+    end
+
+    // 重定向脉冲：只发一次（EXU 拍 or 补发拍），语义与 bp_mispredict 对齐。
+    //   （trap_redirect 的声明已上移到 system_redirect 旁边，这里只做赋值）
+    assign trap_redirect = trap_take | trap_take_q;
 
     logic bp_misp_det;                       // 判定条件为真（不受 mem_stall 影响）
-    assign bp_misp_det = EXU_ctrl_valid & ~(intr_take | system_redirect) &
+    assign bp_misp_det = EXU_ctrl_valid & ~(intr_take | system_redirect | trap_redirect) &
                          ((actual_taken != EXU_pred_taken) ||
                           (actual_taken && (actual_target != EXU_pred_target)));
 
     logic        bp_misp_pend;               // 判定被 hold 挡住，等待补发
-    logic        bp_pend_taken;              // 挂起时的实际方向
+    // v9 修复（C6）：`bp_pend_taken` 已删除。
+    //   它的唯一用处是拼 bp_redir_taken，而那个信号没人读；补发重定向只需要
+    //   "跳到哪"（bp_pend_target 已经把"不跳则 pc+4"折叠进去了），
+    //   方向信息不参与 IFU 的重定向决策，留下就是死寄存器。
     logic [31:0] bp_pend_target;             // 挂起时的实际目标（含“不跳则 pc+4”）
     logic        bp_mispredict_raw;          // 判定存在（尚未去抖/去重），见下
 
     // 补发脉冲：hold 结束后（~mem_stall）本拍可发；否则先挂起。
     assign bp_mispredict_raw = (bp_misp_det | bp_misp_pend) & ~mem_stall;
 
-    // 本拍重定向用的方向/目标：**挂起值优先**。
+    // 本拍重定向用的目标：**挂起值优先**。
     //   挂起的是"更早、已经确认但没能送达 IFU"的那次误预测，必须先补发它；
     //   否则会出现：hold 拍挂起了 jal(0xd4)→0x110，下一拍落在错路径上的
     //   jal(0xd8)→0x128 也被判为误预测并抢走重定向（实测 rnd034）。
-    logic        bp_redir_taken;
+    //
+    // v9 修复（C6）：这里原来还有一个 `bp_redir_taken`（= bp_misp_pend ? bp_pend_taken
+    //   : actual_taken），但**从头到尾没有任何地方读它** —— Quartus 直接报
+    //     Warning (10036): object "bp_redir_taken" assigned a value but never read
+    //   死信号已删除。方向信息本身不需要单独送出去：
+    //   dnpc 已经承载了"跳到哪"，IFU 只看 dnpc/dnpc_flag；
+    //   而预测器的方向更新走的是 bp_update_taken（见下）。
     logic [31:0] bp_redir_target;
-    assign bp_redir_taken  = bp_misp_pend ? bp_pend_taken  : actual_taken;
     assign bp_redir_target = bp_misp_pend ? bp_pend_target
                           : (actual_taken ? actual_target : (EXU_pc + 32'd4));
 
     always_ff @(posedge clock) begin
         if (reset) begin
             bp_misp_pend   <= 1'b0;
-            bp_pend_taken  <= 1'b0;
             bp_pend_target <= 32'b0;
         end else if (bp_mispredict) begin
             bp_misp_pend   <= 1'b0;          // 已经补发出去
@@ -162,7 +294,6 @@ module Control (
             // 本拍没能发（否则上一个分支已清）→ 挂起。
             // 已有挂起值时不再覆盖：先来先服务，保证不丢任何一次确认的重定向。
             bp_misp_pend   <= 1'b1;
-            bp_pend_taken  <= actual_taken;
             bp_pend_target <= actual_taken ? actual_target : (EXU_pc + 32'd4);
         end
     end
@@ -194,7 +325,9 @@ module Control (
 
     // 系统事件（异常返回 / ecall / fence.i）不由预测器覆盖，必须强制重定向。
     // （system_redirect 的声明已上移到首次使用处之前）
-    assign system_redirect = mret_flag | ecall_flag | fence_i_flag;
+    // v9 修复（C4）：**同步异常也走这条"强制重定向、不许预测器覆盖"的路**。
+    //   trap_redirect 是异常的单拍脉冲（见文件上方 C4 说明）。
+    assign system_redirect = mret_flag | ecall_flag | fence_i_flag | trap_redirect;
 
     // -----------------------------------------------------------------------
     // 中断接收判定（精确中断）：
@@ -208,7 +341,7 @@ module Control (
                      & ~mret_flag & ~ecall_flag & ~IFU_stall & ~mdu_busy;
     assign intr_take = intr_pending & intr_safe;
 
-    assign dnpc_flag      = intr_take | bp_mispredict | system_redirect;
+    assign dnpc_flag      = intr_take | trap_redirect | bp_mispredict | system_redirect;
     // EXU_inst_clear 的作用是**把 EX 级这条指令的控制信息清成 0（变成空操作）**，
     // 用于两类情况：
     //   ① 真正的冲刷：重定向（中断/预测错误/mret/ecall/fence.i）——错的指令必须消失；
@@ -236,40 +369,19 @@ module Control (
     //   再也没人判 → CPU 顺着错路径一直循环（x1 跑到 2491 而不是 10）。
     //   现在把它留给 bp_misp_det 去判：hold 期间判定条件成立就挂起（bp_misp_pend），
     //   等取指侧能接收（~mem_stall）时补发一次重定向。
-    assign EXU_inst_clear = intr_take | bp_mispredict
+    assign EXU_inst_clear = intr_take | bp_mispredict | trap_redirect
                           | (mem_stall & ~(branch_flag | jump_flag))
                           | load_use_stall;
-    logic exu_load_use;
-    logic mem_load_use;
-    logic pipe_load_use;
-    // load-use 冒险判定必须与 Data_hazard 的前递仲裁**保持同一口径**：
-    //   某一级只有在“数据真的可前递”时才算解决冒险，否则要把 IDU 按停。
-    //   原来的 exu_load_use 无条件把“EXU 里是 load”当停顿，而 Data_hazard 的
-    //   exu_hit 又无条件优先取 EXU，两边口径不一致：消费者会被放行到 EXU，
-    //   却从 EXU 拿到了 load 的**旧值/地址**（实测：lw 后紧跟的 add 得到基址）。
-    //   现在改成：
-    //     - EXU 里是 load      -> 数据不可用，必须停（exu_load_use）
-    //     - MEM 里是 load      -> 数据不可用，必须停（mem_load_use）
-    //     - MEM_PIPE 里是 load -> 数据不可用，必须停（pipe_load_use）
-    //     其余情况数据已就绪，由前递直接给值，不再停。
-    //   停顿长度因此自然覆盖到 load 数据可用的那一刻：数据可用的下一拍
-    //   三个条件全为 0，消费者被放行并拿到正确的前递值。
-    // 三级的“是不是 load 且 rd 与 IDU 的源寄存器相同”判定**不能**再乘 IDU_valid：
-    // IDU 在被 stall 的那一拍会把 valid_next 拉低（向下游灌气泡），如果这里要求
-    // IDU_valid=1，暂停条件会在同一拍自己消失，消费者被提前放出去。
-    // 不用 IDU_valid 也不会误判：IDU 空时 inst_d 是 NOP（rs1=rs2=0），而这里都要求
-    // rd != 0，NOP 永远匹配不上；被冻结的 inst_d 保留的正是那条等待中的指令的源寄存器。
-    assign exu_load_use  = EXU_mem_ren && (((EXU_rd == IDU_rs1) || (EXU_rd == IDU_rs2)) && (EXU_rd != 0));
-    assign mem_load_use  = MEM_mem_ren && MEM_valid && (((MEM_rd == IDU_rs1) || (MEM_rd == IDU_rs2)) && (MEM_rd != 0));
-    assign pipe_load_use = MEM_PIPE_mem_ren && MEM_PIPE_valid && (((MEM_PIPE_rd == IDU_rs1) || (MEM_PIPE_rd == IDU_rs2)) && (MEM_PIPE_rd != 0));
-    // 三级之后（MEM2 = LSU 第三级）load 数据已经在 LSU_forward_val_wb 里了，
-    // 由 Data_hazard 的 3'b011 编码直接前递，不再需要暂停。
+    // v9 修复（C2）：`exu_load_use / mem_load_use / pipe_load_use` 三个分级明细
+    //   已经搬进 Data_hazard（与它自己的命中条件同一份代码算出来），
+    //   从那里引进来；本模块**不再**自己写第二份"某级是不是 load"的判断。
+    //   历史教训（B5）：两份口径一旦不同步，就会出现"Control 不判停顿、
+    //   而 Data_hazard 把可用的 load 数据挡掉"，消费者读到寄存器堆旧值。
     // mdu_busy 也并入前端暂停：MDU 迭代期间 EX 级一直占着那条 M 指令，
-    // 前端必须停住，否则会把后续指令推进来覆盖它。
+    //   前端必须停住，否则会把后续指令推进来覆盖它。
     // 两路暂停信号：
-    //   load_use_stall —— 只含 load-use 冒险（供 EXU 的冲刷判定，见下）
+    //   load_use_stall —— 只含 load-use 冒险（供 EXU 的冲刷判定）
     //   IFU_stall      —— 前端总暂停：再并入 mdu_busy，供 IFU 冻结 PC/取指使用
-    assign load_use_stall = exu_load_use | mem_load_use | pipe_load_use;
     assign IFU_stall      = load_use_stall | mdu_busy;
 
 
@@ -303,7 +415,10 @@ module Control (
                         IDU_rs2_value;
 
 
-// Data_hazard 只产生选择编码，Control 再结合实际数据源输出最终前递结果。
+// Data_hazard 是**唯一**的前递/冒险裁决源：
+//   它输出 IDU_rs1_choice / IDU_rs2_choice（谁来前递）与 load_use_stall
+//   （要不要停），本模块只负责把编码翻译成数据值、把 stall 接到冻结逻辑上。
+//   v9 修复（C2）：load-use 的三个分级条件已经搬进 Data_hazard，不再出现在这里。
 Data_hazard Data_hazard_inst (
     .IDU_rs1        (IDU_rs1),
     .IDU_rs2        (IDU_rs2),
@@ -321,13 +436,17 @@ Data_hazard Data_hazard_inst (
     .MEM_mem_ren    (MEM_mem_ren),
     .MEM_PIPE_mem_ren(MEM_PIPE_mem_ren),
     .EXU_R_Wen      (EXU_R_Wen),
-        .EXU_mem_ren    (EXU_mem_ren),
+    .EXU_mem_ren    (EXU_mem_ren),
     .MEM_R_Wen      (MEM_R_Wen),
     .MEM_PIPE_R_Wen (MEM_PIPE_R_Wen),
     .MEM2_R_Wen     (MEM2_R_Wen),
     .WB_R_Wen       (WB_R_Wen),
     .IDU_rs1_choice (IDU_rs1_choice),
-    .IDU_rs2_choice (IDU_rs2_choice)
+    .IDU_rs2_choice (IDU_rs2_choice),
+    .load_use_stall (load_use_stall),
+    .exu_load_use   (exu_load_use_dbg),
+    .mem_load_use   (mem_load_use_dbg),
+    .pipe_load_use  (pipe_load_use_dbg)
 );
 
 endmodule        //PC_Control

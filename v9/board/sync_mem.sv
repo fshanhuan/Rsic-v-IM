@@ -53,6 +53,21 @@ module sync_mem #(
 );
 
     localparam ADDR_BITS = $clog2(WORDS);
+    // 初始化循环上限。为什么要有这个上限：
+    //   Quartus 的 Verilog 解析器对 `initial`/`for` 的循环次数有硬上限
+    //   （默认 5000，且**不是** QSF 设置项），DRAM 默认 16384 字直接踩线：
+    //     Error (10106): Verilog HDL Loop error at sync_mem.sv(94):
+    //                    loop must terminate within 5000 iterations
+    //     Error (12152): Can't elaborate user hierarchy "sync_mem:dram_inst"
+    //   → 整个 board_top 无法综合，自然也就 fit / 时序 / 上板全都跑不起来。
+    //   真实的 BRAM 上电内容是 undefined，并不依赖这段清零；它只是为了给 4 态
+    //   仿真一个确定的初值。所以这里把**被清零的字数**限制成「不超过 4096」：
+    //     - 仿真（iverilog/ModelSim）：IROM(4096) 与测试台里的 DRAM 都由
+    //       测试台自己 `$readmemh`/清零，初值语义不变，回归结果不变；
+    //     - 综合（Quartus）：循环次数 ≤ 4096 < 5000，能过。
+    //   注意不要用 `i < WORDS && i < 4096` 之外的写法（例如 break/return），
+    //   Quartus 对非常规循环控制的支持更差。
+    localparam INIT_WORDS = (WORDS < 4096) ? WORDS : 4096;
 
     (* rom_style = "block" *) logic [31:0] mem_rom [0:WORDS-1];
     (* ram_style = "block" *) logic [31:0] mem_ram [0:WORDS-1];
@@ -77,9 +92,11 @@ module sync_mem #(
     generate
         if (READ_ONLY) begin : g_rom
             // ---- IROM：只读同步 BRAM ----
+            // 只清零 INIT_WORDS 个字（≤4096），其余交给 INIT_FILE；
+            //   全量清零在 Quartus 下会撞 5000 次循环上限（见上面 INIT_WORDS 说明）。
             integer i;
             initial begin
-                for (i = 0; i < WORDS; i = i + 1) mem_rom[i] = 32'h0000_0000;
+                for (i = 0; i < INIT_WORDS; i = i + 1) mem_rom[i] = 32'h0000_0000;
                 if (INIT_FILE != "") $readmemh(INIT_FILE, mem_rom);
             end
 
@@ -91,7 +108,7 @@ module sync_mem #(
             // ---- DRAM：读写同步 BRAM，按 mask 做字节写 ----
             integer j;
             initial begin
-                for (j = 0; j < WORDS; j = j + 1) mem_ram[j] = 32'h0000_0000;
+                for (j = 0; j < INIT_WORDS; j = j + 1) mem_ram[j] = 32'h0000_0000;
                 if (INIT_FILE != "") $readmemh(INIT_FILE, mem_ram);
             end
 

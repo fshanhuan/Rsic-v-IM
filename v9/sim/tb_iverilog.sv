@@ -176,13 +176,18 @@ module tb_iverilog #(
     // ---------------------------------------------------------------------
     wire [31:0] p_if_pc      = u_cpu.IFU_pc;
     wire [31:0] p_if_inst    = u_cpu.IFU_inst;
+    wire        p_if_deliver = u_cpu.IFU_Inst0.advance_en;   // IF 交付有效：= valid & ready & fetch_align，每指令 1 拍
     wire [31:0] p_id_pc      = u_cpu.IDU_pc;
-    wire        p_id_valid   = u_cpu.IDU_valid;
+    wire        p_id_valid   = u_cpu.IDU_valid;             // ID2 的 valid（= valid_d 直通）
+    wire        p_id1_valid  = u_cpu.IDU_Inst0.valid;       // ID1 的 valid（第一级流水寄存）
     wire [31:0] p_ex_pc      = u_cpu.EXU_pc;
     wire [31:0] p_ex_res     = u_cpu.EXU_Ex_result;
     wire [ 4:0] p_ex_rd      = u_cpu.EXU_rd;
     wire        p_ex_valid   = u_cpu.EXU_valid;
-    wire        p_mem_valid  = u_cpu.LSU_valid;
+    wire        p_ex_clr     = u_cpu.EXU_inst_clear;   // EX 级指令清空（跳转/异常/mem_stall/load-use）
+    wire        p_mem_valid  = u_cpu.LSU_valid;        // LSU 第一级(M1) valid
+    wire        p_mem2_valid = u_cpu.LSU_valid_pipe;   // LSU 第二级(M2) valid
+    wire        p_mem3_valid = u_cpu.LSU_valid_wb;   // LSU 第三级(M3) valid，即送 WBU 的 valid_wb
     wire [31:0] p_mem_addr   = u_cpu.lsu_bus_addr;
     wire        p_mem_wen    = u_cpu.lsu_bus_wen;
     wire [31:0] p_wb_pc      = u_cpu.WBU_pc;

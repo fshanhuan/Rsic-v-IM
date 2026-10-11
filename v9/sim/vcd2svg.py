@@ -87,8 +87,11 @@ def sample(path, specs):
     cur = {}
     out, times = [], []
     for t in sorted(ev):
-        # t=0 的初值污染直接丢弃（VCD 在第一个 # 之前会先给一遍初值）
+        # t=0 是初值：只用来给 cur 打底（否则 verilator 的 VCD 在信号首次变化前
+        # 一直是 None），不产生采样点。
         if t == 0:
+            for i, v in ev[t]:
+                cur[i] = v
             continue
         for i, v in ev[t]:
             cur[i] = v

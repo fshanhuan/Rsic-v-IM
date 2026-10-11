@@ -30,6 +30,17 @@ module EXU (
     input [31:0] pred_target_in,
     input [`BP_INDEX_BITS-1:0] pred_index_in,
 
+    // ---- v9 新增（C4）：异常输入 ----
+    // 都由 IDU 在同一拍给出（与 IDU_* 控制位同源、同拍到），本模块只做"锁存 + 汇总"。
+    //   illegal_in     : 本条指令非法（编码不认识）
+    //   mem_misalign_in: load/store 有效地址非对齐（地址已在 IDU 算好）
+    input        illegal_in,
+    input        mem_misalign_in,
+    input [2:0]  mem_misalign_funct3_in,
+    // 本拍 ID 级指令的原始编码：非法指令异常要用它写 mtval（出错指令编码）。
+    //   注意这里用 **IDU 当前译码的 inst_d**，与 illegal_in 同源同拍。
+    input [31:0] fault_inst_in,
+
     output [31:0] branch_pc_next,
     output [31:0] rd_value_next,
     output fetch_i_flag_next,
@@ -67,7 +78,27 @@ module EXU (
     //   进入 EX 并被下游采走、提交（实测 rnd034：错路径的 jal 把 x16 写坏）。
     //   注意只挡住"接收"，不挡"清空"：正在 EX 里那条被判错的跳转/分支仍然要在
     //   重定向当拍正常交给 LSU（jal 的 link 写回靠的就是这一拍）。
-    input  logic bp_pend
+    input  logic bp_pend,
+
+    // v9 新增（C4）：同步异常被**确认接收**的那一拍（单拍脉冲，来自 Control 的
+    //   trap_take）。专门用来清异常标志，**不参与** EXU_inst_clr。
+    //   为什么要单独一根线：EXU_inst_clear 在主冲刷（trap_redirect / bp_mispredict /
+    //   intr_take）那一拍会把持续拉低本级 valid_next 直到流水排空，如果异常标志也
+    //   挂在它上面清，就会出现"标志清不掉、而指令又推不出去"的僵局 ——
+    //   实测现象是 EXU 卡在出错指令上、后续指令（包括陷阱处理程序）全部进不去。
+    //   异常标志是"跟着这条指令走的一次性状态"，用一次性脉冲清最干净。
+    input  logic trap_take,
+
+    // ---- v9 新增（C4）：异常输出（已锁存，与 EX 级当前指令一一对应）----
+    // 优先级由 Control 决定：非法指令 > 访存非对齐 > 指令地址非对齐。
+    //   iaddr_misalign_exc 用**实际**目标地址判定（branch 用 branch_pc_reg，
+    //   jal/jalr 用 EX_result)，不是预测目标。
+    output logic illegal_exc,
+    output logic mem_misalign_exc,
+    output logic [2:0] mem_misalign_funct3_exc,
+    output logic iaddr_misalign_exc,
+    // v9 新增（C4）：出错指令的原始编码（随流水锁存），供 mtval 使用
+    output logic [31:0] fault_inst_exc
 );
 
 
@@ -96,6 +127,21 @@ module EXU (
 
     logic [31: 0] rd_value_reg;
     logic fetch_i_reg;
+
+    // ---- v9 新增（C4）：异常状态寄存器（与 EX 级当前指令一一对应）----
+    logic        illegal_reg;
+    logic        mem_misalign_reg;
+    logic [2:0]  mem_misalign_f3_reg;
+    logic        iaddr_misalign_reg;
+    logic [31:0] fault_inst_reg;
+
+    // v9 新增（C4）：EX 级"实际跳转/分支目标"的低 2 位。
+    //   分支与 jal 在 IDU 里都映射成 add1 + add2（PC + imm）的加法，
+    //   jalr 的目标 bit0 被硬件清零、天然对齐，所以这里统一用加法结果判断。
+    //   提取成一个具名 wire 是必须的：SystemVerilog/Verilog 不允许对表达式结果
+    //   直接做位选（`(a+b)[1:0]` 会报 vlog-13069 syntax error）。
+    logic [1:0]  branch_target_low2;
+    assign branch_target_low2 = (add1_reg + add2_reg) & 32'h3;
 
     /* ---------------------------------------------------------------------
      * v9 上板改造：时序化 MDU 的“等结果”握手
@@ -291,6 +337,47 @@ always_ff @(posedge clock) begin
     end
 end
 
+// ---------------------------------------------------------------------------
+// v9 修复（C4）：异常标志的清除必须**独立于流水线握手**，单独一个 always_ff。
+//
+//   踩到的坑（实测把 PC 锁在 mtvec 上）：异常标志原来跟其他控制寄存器写在同一个
+//   always_ff 里，清除分支的条件是 `valid_last & ready_next & EXU_inst_clr`。
+//   trap 那一拍之后：本级 valid_next 被清 0 → 下游 LSU 的 valid_reg=0 →
+//   LSU_ready=0 → ready_next=0，于是"清除分支"永远不成立，而记录分支又要求
+//   `valid_last & ~mdu_stall & ~bp_pend`（此时 valid_last 也已经是 0）——
+//   异常标志**卡死在 1**：`exc_pending` 每拍都成立，trap_take/trap_redirect
+//   每拍都发，PC 被反复重定向回 mtvec，陷入处理程序的第一条都跑不完。
+//
+//   修法：异常标志是"跟着指令走的一次性状态"，指令一旦被作废（EXU_inst_clr）
+//   就必须立刻清掉，不需要等任何握手；其余情况正常跟随输入锁存。
+//   清零优先于锁存，且两者互斥，不会出现多驱动。
+// ---------------------------------------------------------------------------
+always_ff @(posedge clock) begin
+    if (reset | trap_take) begin
+        illegal_reg         <= 1'b0;
+        mem_misalign_reg    <= 1'b0;
+        mem_misalign_f3_reg <= 3'b0;
+        iaddr_misalign_reg  <= 1'b0;
+        fault_inst_reg      <= 32'b0;
+    end else if (valid_last & ready_next & ~mdu_stall & ~bp_pend) begin
+        illegal_reg         <= illegal_in;
+        mem_misalign_reg    <= mem_misalign_in;
+        mem_misalign_f3_reg <= mem_misalign_funct3_in;
+        fault_inst_reg      <= fault_inst_in;
+        // 指令地址非对齐：**实际**目标地址必须 2 字节对齐（基础指令集要求）。
+        //   分支：实际目标是 branch_pc = PC + imm_B
+        //   jal ：实际目标是 PC + imm_J
+        //   jalr：实际目标是 (rs1 + imm) 且 bit0 被硬件清零，天然对齐，不会触发
+        // 判据只看"低 2 位是否为 0"，两种情况可以用同一个加法表示 ——
+        // 分支与 jal 在 IDU 里都被映射成 add1/add2 的加法（PC + imm），所以直接
+        // 用**已锁存**的 add1_reg/add2_reg 算，不引用下面后置声明的 exec_res。
+        // 门控用已锁存的 branch_flag_reg/jump_flag_reg，属于 EX 级寄存器边界
+        // 之后，不给跨级关键路径添负担。
+        iaddr_misalign_reg  <= ((branch_flag_reg | jump_flag_reg)
+                                & (branch_target_low2 != 2'b00));
+    end
+end
+
 
     logic [31:0] alu_res;
     logic [31:0] exec_res;
@@ -319,6 +406,18 @@ end
     assign ready_last                  = ready_next & ~mdu_stall;
     assign fetch_i_flag_next           = fetch_i_reg;
     assign branch_pc_next              = branch_pc_reg;
+
+    // v9 新增（C4）：异常输出（已锁存，与 EX 级当前指令一一对应）。
+    //   **必须与 valid_next 相与**：只要出现过一次"指令不在 EX 里、但异常位还留着"
+    //   的窗口，下游就会在流水线空转期间反复看到 exc_pending，把 PC 反复重定向，
+    //   整机锁死。实测就是这么锁死的：非法指令本身正确陷入了
+    //   （mcause=2 / mepc=0x20），但异常标志"粘"在 EXU 上，
+    //   陷阱处理程序的第一条永远进不去 —— 加这一层后解掉。
+    assign illegal_exc              = illegal_reg        & valid_next;
+    assign mem_misalign_exc         = mem_misalign_reg   & valid_next;
+    assign mem_misalign_funct3_exc  = mem_misalign_f3_reg;
+    assign iaddr_misalign_exc       = iaddr_misalign_reg & valid_next;
+    assign fault_inst_exc           = fault_inst_reg;
 
 
 /* verilator lint_off PINMISSING */

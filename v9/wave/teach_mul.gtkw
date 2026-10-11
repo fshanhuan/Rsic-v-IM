@@ -1,0 +1,100 @@
+[*]
+[*] GTKWave Analyzer v3.3.116 (w)1999-2023 BSI
+[*] 04 mul 单拍
+[*]
+[dumpfile] "teach_mul.vcd"
+[timestart] 0
+[size] 1600 950
+[pos] -1 -1
+[sst_width] 240
+[signals_width] 240
+[sst_expanded] 1
+[sst_vpaned_height] 280
+-CLK
+@28
+tb_iverilog.clk
+-IF
+@23
+tb_iverilog.p_if_pc[31:0]
+@23
+tb_iverilog.p_if_inst[31:0]
+@28
+tb_iverilog.p_stall
+tb_iverilog.u_cpu.IFU_Inst0.advance_en
+-ID
+@23
+tb_iverilog.p_id_pc[31:0]
+@28
+tb_iverilog.u_cpu.IDU_Inst0.valid
+tb_iverilog.p_id_valid
+-EX
+@23
+tb_iverilog.p_ex_pc[31:0]
+@23
+tb_iverilog.p_ex_res[31:0]
+@23
+tb_iverilog.p_ex_rd[4:0]
+@28
+tb_iverilog.p_ex_valid
+tb_iverilog.u_cpu.EXU_inst_clear
+-MEM
+@28
+tb_iverilog.p_mem_valid
+tb_iverilog.u_cpu.LSU_valid_pipe
+tb_iverilog.u_cpu.LSU_valid_wb
+@28
+tb_iverilog.p_mem_wen
+@23
+tb_iverilog.p_mem_addr[31:0]
+-WB
+@28
+tb_iverilog.p_wb_valid
+@23
+tb_iverilog.p_wb_pc[31:0]
+@23
+tb_iverilog.p_wb_rd[4:0]
+@23
+tb_iverilog.p_wb_val[31:0]
+-CTRL
+@28
+tb_iverilog.p_dnpc_flag
+@23
+tb_iverilog.p_dnpc[31:0]
+@28
+tb_iverilog.p_pred_taken
+@28
+tb_iverilog.p_mispredict
+@28
+tb_iverilog.p_ecall
+-REGS
+@23
+tb_iverilog.p_r1[31:0]
+@23
+tb_iverilog.p_r2[31:0]
+@23
+tb_iverilog.p_r3[31:0]
+@23
+tb_iverilog.p_r4[31:0]
+@23
+tb_iverilog.p_r5[31:0]
+@23
+tb_iverilog.p_r6[31:0]
+@23
+tb_iverilog.p_r7[31:0]
+@23
+tb_iverilog.p_r8[31:0]
+@23
+tb_iverilog.p_r9[31:0]
+@23
+tb_iverilog.p_r10[31:0]
+-CSR
+@23
+tb_iverilog.p_mepc[31:0]
+@23
+tb_iverilog.p_mcause[31:0]
+@23
+tb_iverilog.p_mstatus[31:0]
+@23
+tb_iverilog.p_mtvec[31:0]
+[pattern_trace] 1
+[pattern_trace] 0

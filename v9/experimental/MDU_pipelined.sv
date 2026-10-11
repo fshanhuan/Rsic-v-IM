@@ -96,7 +96,11 @@ module MDU_pipelined #(
     // 不能读端口 d1/d2/op —— 它们会随流水线前进而变成下一条指令）
     logic [31:0] op_a_r, op_b_r;
     logic [ 1:0] div_sel_r;
-    logic        d1_neg_r, sign_diff_r, div_signed_r;
+    logic        d1_neg_r, sign_diff_r;
+    // v9 修复（C6）：删掉了 div_signed_r。
+    //   它被锁存下来却从未参与任何结果选择（结果回正只用 sign_diff_r 与 d1_neg_r，
+    //   边界判断只用 op_a_r/op_b_r/div_sel_r），Quartus 报：
+    //     Warning (10036): object "div_signed_r" assigned a value but never read
 
     logic        not_neg;
     logic [31:0] shifted, rem_nxt, q_nxt;
@@ -121,7 +125,6 @@ module MDU_pipelined #(
             div_sel_r   <= 2'b0;
             d1_neg_r    <= 1'b0;
             sign_diff_r <= 1'b0;
-            div_signed_r<= 1'b0;
         end else begin
             /* ---- 乘法：单拍寄存 ---- */
             if (is_mul_pre) begin
@@ -146,7 +149,6 @@ module MDU_pipelined #(
                 div_sel_r   <= op_sel;
                 d1_neg_r    <= d1[31];
                 sign_diff_r <= d1[31] ^ d2[31];
-                div_signed_r<= div_signed_pre;
             end else if (div_run) begin
                 r_rem <= rem_nxt;
                 r_q   <= q_nxt;

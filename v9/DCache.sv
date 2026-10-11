@@ -190,11 +190,16 @@ module DCache #(
     logic [1:0] store_state;
     logic       store_fire;
 
-    logic [31:0] store2_addr;
     logic [31:0] store2_wdata;
     logic [ 1:0] store2_mask;
+    // v9 修复（C6）：删掉了 store2_addr / store2_tag。
+    //   它们在 store_fire 那一拍被锁存，但**从来没有被读过**（Quartus:
+    //     Warning (10036): object "store2_addr" assigned a value but never read
+    //     Warning (10036): object "store2_tag" assigned a value but never read
+    //   ）。原因很简单：一次 store 需要跨拍保留的只有 payload（wdata/mask）
+    //   和"它属于哪一行"（index，用于命中合并）；地址本身既不再上总线
+    //   （总线地址走 mem_addr = cpu_addr_r）、也不再做比较。
     logic [INDEX_BITS-1:0] store2_index;
-    logic [TAG_BITS-1:0]   store2_tag;
     logic [ 1:0]           store2_offset;
     logic                  store2_hit;
     logic                  store_req_r;
@@ -222,11 +227,9 @@ module DCache #(
             mem_req_r    <= 1'b0;
             store_state  <= WR_IDLE;
             store_req_r  <= 1'b0;
-            store2_addr  <= 32'b0;
             store2_wdata <= 32'b0;
             store2_mask  <= 2'b0;
             store2_index <= {INDEX_BITS{1'b0}};
-            store2_tag   <= {TAG_BITS{1'b0}};
             store2_offset<= 2'b0;
             store2_hit   <= 1'b0;
             hit_cnt      <= 32'b0;
@@ -257,11 +260,9 @@ module DCache #(
             //   只在 store_fire 采，这样载荷与脉冲严格属于同一次 store；
             //   若每拍都采，脉冲那一拍会采到上游已推进上来的下一条指令的地址。
             if (store_fire) begin
-                store2_addr   <= cpu_addr;
                 store2_wdata  <= cpu_wdata;
                 store2_mask   <= cpu_mask;
                 store2_index  <= index;
-                store2_tag    <= tag_in;
                 store2_offset <= cpu_addr[1:0];
                 store2_hit    <= ~uncacheable_req & valid[index] & (tag[index] == tag_in);
             end
