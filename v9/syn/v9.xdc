@@ -12,9 +12,11 @@
 #   （全工程 *.sv 里 "fpga_clk" 零命中）→ Vivado 的 get_ports 找不到对象，
 #   时钟根本没约束上，时序报告是假的。
 # 教学与上板验证建议先从 50MHz 起，确认功能后逐步提高到 100/150MHz；
-# 板载晶振频率请按实际修改（Nexys A7/Basys3 为 100MHz，DE2-115 为 50MHz），
-# 并与 syn/v9.sdc、以及仿真的时钟周期保持一致（本模板统一用 10ns = 100MHz）。
-create_clock -period 10.000 -name sys_clk [get_ports sys_clk]
+# 板载晶振频率请按实际修改（Nexys A7/Basys3 为 100MHz，DE2-115 为 50MHz）。
+# v9 修复：三处约束口径统一为 **20ns = 50MHz**（本文件 / syn/v9.sdc /
+#   E:/FPGA/v9_vivado/v9_board.xdc）。仿真时钟仍是 10ns=100MHz，仿真不受影响；
+#   板载晶振若是 100MHz，请配合 MMCM 分频或直接改回 10ns。
+create_clock -period 20.000 -name sys_clk [get_ports sys_clk]
 
 # ---- 复位 ------------------------------------------------------------------
 # 若板卡复位按键是异步的，请保留为异步输入并用同步器采样（见 syn/上板改造说明.md）。

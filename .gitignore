@@ -85,3 +85,13 @@ work/
 msim/work/
 transcript
 modelsim.ini
+
+# ---- 追加（v9 上板/Vivado 实测阶段）：修正子目录下失效的忽略模式 ----
+# 说明：上面 `quartus/build/db/` 这类写法是**根目录锚定**的，在 v9/ 子目录里不生效，
+#       于是 v9/quartus/build/db 与 incremental_db 这 79MB 中间产物会被当成待入库文件。
+#       这里补上不锚定的模式（含 vivado_project/_ees331_pages 的 4.6MB 页图与 py 缓存）。
+db/
+incremental_db/
+__pycache__/
+_ees331_pages/
+dfx_runtime.txt

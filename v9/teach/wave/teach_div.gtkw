@@ -1,0 +1,112 @@
+[*]
+[*] 讲解版波形会话（verilator VCD，顶层 TOP）
+[*]
+[dumpfile] "teach_div.vcd"
+[timestart] 0
+[size] 1600 950
+[pos] -1 -1
+[sst_width] 260
+[signals_width] 320
+[sst_expanded] 1
+-CLK
+@28
+TOP.tb_iverilog.clk
+-IFU
+@23
+TOP.tb_iverilog.IFU_pc[31:0]
+@23
+TOP.tb_iverilog.IFU_inst[31:0]
+@28
+TOP.tb_iverilog.IFU_valid
+@28
+TOP.tb_iverilog.IFU_advance_en
+@28
+TOP.tb_iverilog.IDU_ready
+-IDU
+@23
+TOP.tb_iverilog.IDU_pc[31:0]
+@28
+TOP.tb_iverilog.IDU_ID1_valid
+@28
+TOP.tb_iverilog.IDU_ID2_valid
+@28
+TOP.tb_iverilog.EXU_ready
+-EXU
+@23
+TOP.tb_iverilog.EXU_pc[31:0]
+@23
+TOP.tb_iverilog.EXU_result[31:0]
+@23
+TOP.tb_iverilog.EXU_rd[4:0]
+@28
+TOP.tb_iverilog.EXU_valid
+@28
+TOP.tb_iverilog.EXU_inst_clr
+@28
+TOP.tb_iverilog.LSU_ready
+-LSU
+@28
+TOP.tb_iverilog.LSU_M1_valid
+@28
+TOP.tb_iverilog.LSU_M2_valid
+@28
+TOP.tb_iverilog.LSU_M3_valid
+@28
+TOP.tb_iverilog.LSU_mem_wen
+@23
+TOP.tb_iverilog.LSU_mem_addr[31:0]
+@28
+TOP.tb_iverilog.WBU_ready
+-WBU
+@28
+TOP.tb_iverilog.WBU_valid
+@23
+TOP.tb_iverilog.WBU_pc[31:0]
+@23
+TOP.tb_iverilog.WBU_rd[4:0]
+@23
+TOP.tb_iverilog.WBU_rd_value[31:0]
+-CTRL
+@28
+TOP.tb_iverilog.CTRL_IFU_stall
+@28
+TOP.tb_iverilog.CTRL_load_use_stall
+@28
+TOP.tb_iverilog.CTRL_mdu_busy
+@28
+TOP.tb_iverilog.CTRL_icache_hold
+@28
+TOP.tb_iverilog.CTRL_dcache_hold
+@28
+TOP.tb_iverilog.CTRL_dnpc_flag
+@23
+TOP.tb_iverilog.CTRL_dnpc[31:0]
+@28
+TOP.tb_iverilog.CTRL_pred_taken
+@28
+TOP.tb_iverilog.CTRL_mispredict
+@28
+TOP.tb_iverilog.CTRL_ecall
+-REGS
+@23
+TOP.tb_iverilog.p_r1[31:0]
+@23
+TOP.tb_iverilog.p_r2[31:0]
+@23
+TOP.tb_iverilog.p_r3[31:0]
+@23
+TOP.tb_iverilog.p_r4[31:0]
+@23
+TOP.tb_iverilog.p_r5[31:0]
+@23
+TOP.tb_iverilog.p_r6[31:0]
+@23
+TOP.tb_iverilog.p_r7[31:0]
+@23
+TOP.tb_iverilog.p_r8[31:0]
+@23
+TOP.tb_iverilog.p_r9[31:0]
+@23
+TOP.tb_iverilog.p_r10[31:0]
+[pattern_trace] 1
+[pattern_trace] 0

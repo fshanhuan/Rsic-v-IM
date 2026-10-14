@@ -6,9 +6,10 @@
 # 主时钟。
 # v9 修复：① 端口名改成 board/board_top.sv 的真实端口 sys_clk（原来写 fpga_clk，
 #              全工程 *.sv 里零命中 → 时钟没约束上）；
-#           ② 周期与 syn/v9.xdc、仿真时钟统一为 10ns(100MHz)，原来这里 20ns(50MHz)
-#              与 xdc 的 10ns 自相矛盾。上板先跑通再逐步收紧即可。
-create_clock -name sys_clk -period 10.000 [get_ports {sys_clk}]
+#           ② 周期与 syn/v9.xdc 统一为 **20ns(50MHz)**。
+#              上板先从 50MHz 跑通，再按 syn/timing_sweep.tcl 逐步收紧到 100/150MHz。
+#              （注意：仿真时钟仍是 10ns=100MHz，只影响仿真，不影响这里的约束。）
+create_clock -name sys_clk -period 20.000 [get_ports {sys_clk}]
 
 # 复位为异步输入（board_top 的按键端口名）
 set_false_path -from [get_ports {btn_rst_n}]

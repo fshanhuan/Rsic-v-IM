@@ -53,18 +53,32 @@ module board_top #(
     input  logic        sys_clk,
     input  logic        btn_rst_n,     // 板卡按键复位，低有效（建议先消抖）
 
-    /* ---- P4 可观测性：写回信息引出（数码管 / LED / UART 都用它） ---- */
-    output logic        debug_wb_have_inst,
-    output logic [31:0] debug_wb_pc,
-    output logic        debug_wb_ena,
-    output logic [ 4:0] debug_wb_reg,
-    output logic [31:0] debug_wb_value,
+    /* ---- P4 可观测性：写回信息引出（数码管 / LED / ILA 都用它） ---- */
+    // v9 + ILA：加 keep，保证这些端口在"顶层悬空"时也不被综合优化掉，
+    //   这样 ILA（mark_debug 标记在 myCPU 侧）一定能抓到它们。
+    (* keep = "true" *) output logic        debug_wb_have_inst,
+    (* keep = "true" *) output logic [31:0] debug_wb_pc,
+    (* keep = "true" *) output logic        debug_wb_ena,
+    (* keep = "true" *) output logic [ 4:0] debug_wb_reg,
+    (* keep = "true" *) output logic [31:0] debug_wb_value,
 
-    /* ---- 便于上板观察的额外计数器输出 ---- */
-    output logic [31:0] debug_icache_hit_cnt,
-    output logic [31:0] debug_icache_miss_cnt,
-    output logic [31:0] debug_dcache_hit_cnt,
-    output logic [31:0] debug_dcache_miss_cnt
+    /* ---- 便于观察的额外计数器输出 ---- */
+    (* keep = "true" *) output logic [31:0] debug_icache_hit_cnt,
+    (* keep = "true" *) output logic [31:0] debug_icache_miss_cnt,
+    (* keep = "true" *) output logic [31:0] debug_dcache_hit_cnt,
+    (* keep = "true" *) output logic [31:0] debug_dcache_miss_cnt,
+
+    /* ---- 异常现场观察口（v9 + ILA 新增引出） ---- */
+    // 这 4 个口在 myCPU 上一直存在（v9 修复 C4 加的），但 board_top 原来**没有引出**，
+    //   于是 myCPU 例化时它们是悬空的 —— 板上/ILA 都看不到异常现场。
+    //   现在一并引出，交给 ILA 抓（不占引脚）。
+    // 注意：debug_mtval 目前抓到的值不可信 —— CSR 的 mtval 在 RTL 层面就没被写
+    //   （综合报 mtval_reg_reg was removed / mtval_out does not have driver），
+    //   属于 RTL 待修项，不是引出方式的问题。
+    (* keep = "true" *) output logic [31:0] debug_mcause,
+    (* keep = "true" *) output logic [31:0] debug_mepc,
+    (* keep = "true" *) output logic [31:0] debug_mtval,
+    (* keep = "true" *) output logic        debug_trap_take
 );
 
     /* ---------------- 1) 复位：异步置位、同步释放 ---------------- */
@@ -116,7 +130,13 @@ module board_top #(
         .debug_icache_hit_cnt  (debug_icache_hit_cnt),
         .debug_icache_miss_cnt (debug_icache_miss_cnt),
         .debug_dcache_hit_cnt  (debug_dcache_hit_cnt),
-        .debug_dcache_miss_cnt (debug_dcache_miss_cnt)
+        .debug_dcache_miss_cnt (debug_dcache_miss_cnt),
+
+        // v9 + ILA：异常现场观察口（原来这 4 个口是悬空的，现在引到顶层给 ILA 抓）
+        .debug_mcause          (debug_mcause),
+        .debug_mepc            (debug_mepc),
+        .debug_mtval           (debug_mtval),
+        .debug_trap_take       (debug_trap_take)
     );
 
     // I-Cache 的读使能 / D-Cache 的读使能：直接接同步存储器的读口。

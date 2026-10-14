@@ -45,31 +45,37 @@ module myCPU (
     output [31:0] perip_wdata,
     input  [31:0] perip_rdata,
 
-    output  logic debug_wb_have_inst,
-    output  logic [31:0] debug_wb_pc,
-    output  logic debug_wb_ena,
-    output  logic [4:0] debug_wb_reg,
-    output  logic [31:0] debug_wb_value,
+    // v9 + ILA：mark_debug 让这些调试信号在综合后被 ILA 找到。
+    //   KEEP = "true" 防止它们因为"顶层没有负载"被优化掉（这正是上板时的情况：
+    //   board_top_ila 完全不引出 debug_*，若不加 KEEP 综合会把这些寄存器/网络删掉，
+    //   ILA 就没东西可抓）。这四个属性对 iverilog / ModelSim 是透明注释，不影响回归。
+    (* mark_debug = "true", keep = "true" *) output  logic debug_wb_have_inst,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_wb_pc,
+    (* mark_debug = "true", keep = "true" *) output  logic debug_wb_ena,
+    (* mark_debug = "true", keep = "true" *) output  logic [4:0] debug_wb_reg,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_wb_value,
 
     // v9 修复（B8）：四条缓存命中/缺失计数器引到顶层。
     //   原来 board/board_top.sv 直接用层次化引用 `u_cpu.icache_hit_cnt` 等取它们，
     //   而 myCPU 没有这些端口 —— 与 irom_en 是同一类问题，Quartus 报
     //     Error (10207): can't resolve reference to object "icache_hit_cnt"
     //   导致 Analysis & Synthesis 失败、整机上不了板。
-    //   这四条只用于板上观察（数码管/UART/逻辑分析仪），不参与任何控制逻辑。
-    output  logic [31:0] debug_icache_hit_cnt,
-    output  logic [31:0] debug_icache_miss_cnt,
-    output  logic [31:0] debug_dcache_hit_cnt,
-    output  logic [31:0] debug_dcache_miss_cnt,
+    //   这四条只用于板上观察（ILA / 数码管 / UART），不参与任何控制逻辑。
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_icache_hit_cnt,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_icache_miss_cnt,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_dcache_hit_cnt,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_dcache_miss_cnt,
 
     // v9 新增（C4）：异常现场观察口。
     //   异常体系（非法指令 / 非对齐访存 / ecall / 中断）的登记结果引到顶层，
     //   方便板上观察与仿真断言 —— 原来 mepc/mcause 只能靠层次化引用去看，
     //   而 mtval 根本是个死寄存器。
-    output  logic [31:0] debug_mcause,
-    output  logic [31:0] debug_mepc,
-    output  logic [31:0] debug_mtval,
-    output  logic        debug_trap_take
+    // v9 + ILA：之前 board_top 例化 myCPU 时这 4 个口是**悬空**的（板上看不到异常），
+    //   现在同样加 mark_debug/KEEP，交给 ILA 抓，不需要占引脚。
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_mcause,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_mepc,
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_mtval,
+    (* mark_debug = "true", keep = "true" *) output  logic        debug_trap_take
 
 );
 
