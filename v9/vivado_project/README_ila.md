@@ -1,3 +1,10 @@
+> ⚠️ **本文件已废弃（仅作历史记录）。**
+> 它描述的是「内存插桩 + 把成品挂进工程」的旧流程：那条路在磁盘上不产生
+> `.runs`/`.srcs`，GUI 里 Design Runs 全灰，而且依赖的 `reports/post_synth.dcp`
+> 与 `gui_build/` 已经删除，所以下面这些命令**现在跑不通**。
+> 当前方案请见同目录的 [`README.md`](./README.md)，脚本用 `build_project_ila.tcl`。
+
+---
 # v9 ILA 版 Vivado 工程（EES-331 / 50MHz）
 
 本目录是 **v9 的 ILA 调试方案**工程：调试信号**一个都不引到引脚**，

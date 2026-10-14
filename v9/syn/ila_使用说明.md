@@ -10,9 +10,11 @@
 > ILA：标准 IP `u_ila_0`（`xilinx.com:ip:ila:6.2`）**例化在 RTL 里**
 > 重建脚本：`E:\FPGA\v9_vivado_ila\build_project_ila.tcl`
 >
-> ⚠️ 早期两个版本（`v9_vivado` 引脚版 / `v9_ila_gui` 内存插桩版）都不要再用：
-> 前者引脚截断到 8 位，后者**在 GUI 里 Design Runs 全灰**。
-> 原因与正确用法见 `工程打开是黑的_排查与正确用法.md`。
+> ⚠️ 早期两个版本（`v9_vivado` 引脚版 / `v9_ila_gui` 内存插桩版）都**已删除**，不要再用：
+> 前者引脚截断到 8 位，后者**在 GUI 里 Design Runs 全灰**（磁盘上不产生 `.runs`/`.srcs`）。
+> 原因与正确用法见 `工程打开是黑的_排查与正确用法.md`；
+> 仓库里配套的旧脚本（`build_ila.tcl` / `impl_ila.tcl` / `build_gui_project.tcl` 等）
+> 因依赖的 `reports\post_synth.dcp` 已删而**跑不通**，只作历史记录保留。
 >
 > **本版与早期版本最大的区别**：ILA 不再靠 `(* mark_debug *)` + `create_debug_core`
 > 在内存里插入，而是**当普通 IP 例化**。这样 `synth_1` / `impl_1` 都是真实的

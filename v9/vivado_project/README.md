@@ -1,6 +1,17 @@
-# v9 ILA 版 Vivado 工程（EES-331 / 50MHz）—— 工程模式版
+# v9 上板工程说明：ILA 方案 + Vivado 实测（EES-331 / 50MHz）
 
-本目录是 **v9 的 ILA 调试方案**工程：调试信号**一个都不引到引脚**，
+> 本文件同时是**仓库里两份工程目录的说明**：
+> - `v9/vivado_project/`（本目录）—— **当前方案**：ILA 标准 IP 例化、全流程工程模式，
+>   脚本一条命令重建，实测 50MHz 收敛并出 bitstream。**先读这个。**
+> - `v9/syn/` —— 综合/时序文档与约束模板，含实测主报告
+>   [`ila_使用说明.md`](../syn/ila_使用说明.md) 与
+>   [`工程打开是黑的_排查与正确用法.md`](../syn/工程打开是黑的_排查与正确用法.md)。
+>
+> 早期还有两个方案，**都已删除**，只在文档里作为踩坑记录保留：
+> `E:\FPGA\v9_vivado`（引脚引出，105 个端口）与
+> `E:\FPGA\v9_vivado_ila\v9_ila_gui`（内存插桩，GUI 里 Design Runs 全灰）。
+
+本方案是 **v9 的 ILA 调试方案**工程：调试信号**一个都不引到引脚**，
 全部由片内 ILA 通过 JTAG 抓取。顶层只剩 **3 个引脚**。
 
 - 器件：`xc7z020clg484-1`（依元素科技 **EES-331** 教学板）
@@ -33,7 +44,7 @@ CRITICAL WARNING（不中止流程），很容易带着坏约束一路跑到实�
 ## 2. 目录
 
 ```
-E:\FPGA\v9_vivado_ila\
+E:\FPGA\v9_vivado_ila\                 ← 本地 Vivado 工作目录（不入库，见下）
 ├─ v9_ila\                        ★ 工程目录
 │   ├─ v9_ila.xpr                   ★★ 打开这个
 │   └─ v9_ila.runs\
@@ -49,10 +60,22 @@ E:\FPGA\v9_vivado_ila\
 ├─ build_project_ila.tcl          ★★ 一条命令重建工程（工程模式）
 ├─ verify_project.tcl             验证工程能否正常展开（run/IP/网表/时序）
 ├─ src\                           RTL 副本（board_top_ila.sv 从 E:\share doc\v9 同步）
-├─ v9_board_ila.xdc               100MHz 主时钟 + 复位 + 3 个引脚
-├─ v9_ila_gui\                    ⚠️ 旧的空壳工程（无 .runs/.srcs），保留供对比
-├─ gui_build\ / reports\          旧非工程模式的产物（dcp/bit/rpt），历史保留
-└─ 旧脚本：build_ila.tcl / impl_ila.tcl / build_gui_project.tcl（已废弃）
+└─ v9_board_ila.xdc               100MHz 主时钟 + 复位 + 3 个引脚
+```
+
+> **这些文件不入库**，原因有两层：
+> 1) `.gitignore` 会排除 Vivado 产物（`*.xpr` / `*.runs/` / `*.bit` / `*.dcp` / `*.rpt` 等）；
+> 2) 上面那份 `README.md`（本文件）和全部 `.tcl` 脚本、`.xdc` 约束都已收进仓库的
+>    [`v9/vivado_project/`](./)，所以**工程可以从脚本完整重建**，不需要把 100MB+
+>    的 run 产物塞进 Git。
+>
+> 早期「非工程模式」的产物目录（`gui_build\`、`reports\`，含 13MB 的
+> `post_route_ila.dcp` 和 9.7MB 的 `post_route.dcp`）与旧的空壳工程
+> `v9_ila_gui\` **已删除**：它们只是把内存里做完的设计挂进工程，GUI 里
+> Design Runs 全灰，而且 `v9_ila.runs/impl_1/` 里已有同样的产物。
+> 因此下面「已废弃的旧脚本」一节里的 `build_ila.tcl` / `impl_ila.tcl` /
+> `build_gui_project.tcl` 现在**跑不通**（依赖的 `reports\post_synth.dcp` 已删），
+> 它们只作为问题复现的历史记录保留，请一律使用 `build_project_ila.tcl`。
 ```
 
 ## 3. 怎么跑
@@ -150,5 +173,5 @@ probe1 : 97 net(s)   probe11 : 32 net(s)   probe12 : 1 net(s)
 | 版本 | 工程目录 | 顶层 | ILA 方式 | 结果 |
 | --- | --- | --- | --- | --- |
 | 第 1 版 | `E:\FPGA\v9_vivado`（已删） | `board_top_vivado` | 无，调试信号引到 105 个引脚 | 能用，但计数器截断到 8 位 |
-| 第 2 版 | `v9_ila_gui`（空壳，保留对比） | `board_top_ila` | `mark_debug` + 内存 `create_debug_core` | 结果对，但 GUI 全灰 |
+| 第 2 版 | `v9_ila_gui`（已删） | `board_top_ila` | `mark_debug` + 内存 `create_debug_core` | 结果对，但 GUI 全灰（无 `.runs`/`.srcs`） |
 | **第 3 版（当前）** | **`v9_ila`** | **`board_top_gui`** | **标准 IP 例化** | **run 真实存在，GUI 全流程可见** |
