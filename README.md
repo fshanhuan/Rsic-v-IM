@@ -9,8 +9,12 @@
 - 当前版本：**v9**（源码在 [`v9/`](./v9)）。上板改造后又做了**一轮独立验证 + 缺陷修复**
   （见 [验证报告_独立复核.md](./验证报告_独立复核.md)）：官方回归从 7 项扩到 **15 项**，
   单轮 **239/239 项检查全过**（严格模式同样全过），板级顶层自检 **33/33 PASS**。
-- 精度定位：**能跑、能综合、波形可读、文档齐全**的教学核；不是工业级 IP，
-  真实时序收敛与板级实测尚未完成（见 [已知限制](#已知限制--roadmap)）。
+- **已在真实工具链上收敛**：Vivado 2025.2 / `xc7z020clg484-1`（依元素 EES-331 教学板），
+  CPU 时钟 **50MHz** 下 WNS **+4.162ns**、失败端点 **0 / 27564**、DRC **0 Error**，
+  已生成含 ILA 的 bitstream。实测数据与踩坑记录见
+  [`v9/syn/ila_使用说明.md`](./v9/syn/ila_使用说明.md)。
+- 精度定位：**能跑、能综合、时序收敛、波形可读、文档齐全**的教学核；不是工业级 IP，
+  板级实测（上板跑程序、外设引脚译码）尚未完成（见 [已知限制](#已知限制--roadmap)）。
 
 ---
 
@@ -74,11 +78,15 @@ Rsic-v-IM/
     ├── Control.sv / Data_hazard.sv         ← 控制与冒险处理（前递 / 暂停 / 冲刷 / 重定向）
     ├── ALU / Reg / Reg_Stack / RegisterFile / add / sext / para.sv
     ├── board/       ← 上板件：sync_mem（一拍读延迟 BRAM 模型）/ reset_sync / board_top + 测试台
+    │                    另有 board_top_ila（MMCM 100→50MHz + 片内 ILA 观察口）
     ├── experimental/← MDU_pipelined.sv（**上板用**乘除单元，已接入 EXU）+ 独立测试台
     ├── sim/         ← 自包含 iverilog 回归测试台 + 三个程序 + 运行脚本 + 波形工具
     ├── syn/         ← 综合/时序：synth_core.ys、v9.xdc、v9.sdc、timing_sweep.tcl、报告
+    │                    ★ ila_使用说明.md / 工程打开是黑的_排查与正确用法.md（Vivado 实测）
+    ├── vivado_project/ ← Vivado Tcl 脚本与约束（工程模式，一条命令重建 + 自检）
     ├── docs/        ← ★ 模块阅读文档（逐模块 I/O、关键信号、改造清单）
     ├── figures/     ← 上板改造后重新生成的时序图（SVG）
+    ├── teach/       ← 教学波形包：20 个演示程序的 hex + RTL + 测试台 + GTKWave 视图
     └── wave/        ← 上板改造后的 VCD（文档里引用的可视证据）
 ```
 
@@ -95,9 +103,9 @@ Rsic-v-IM/
 | 分支预测 | gshare（6 位 GHR ⊕ PC 低位 → 64 项 2 位计数器）+ 64 项 BTB | ✅ 回归通过 |
 | 数据前递 / load-use 暂停 | `Data_hazard`：4 个前递点（含 MEM 三级对齐） | ✅ 回归通过 |
 | 上板件 | `board/`：复位同步释放、同步 BRAM 模型、板级顶层 + 测试台 | ✅ 板级自检 33/33 PASS（CI 里真正运行） |
-| 真实综合/实现（Fmax、LUT/FF/BRAM 实数） | `syn/`（有脚本与约束模板） | ⚠️ 未做（缺 Vivado/yosys 环境） |
+| **真实综合/实现（Vivado 2025.2）** | [`v9/vivado_project/`](./v9/vivado_project)（Tcl 脚本 + XDC） | ✅ **50MHz WNS +4.162ns、0 失败端点、DRC 0 Error、已出 bitstream**（见下节） |
 | 47 条全指令表 difftest（`cdp-tests`） | 需 verilator + make | ⚠️ 未做（有 103 项替代回归） |
-| 板级实测（比特流、引脚译码） | — | ⚠️ 未做 |
+| 板级实测（上板跑程序、引脚译码） | — | ⚠️ 未做（bitstream 与 ILA 已就绪） |
 
 上板改造修掉了 **6 个真实 RTL 缺陷**（load 后紧邻指令前递拿到地址、重定向连环触发、
 `ecall` 永不产生异常、写回被 `valid` 掐掉、`WBU.stall` 悬空、x0 初值为 `x`）；
@@ -139,6 +147,60 @@ DRAM 读口没有读使能（与真实 BRAM 语义不符，掩盖了第 2 条）
 
 CI 配置见 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)：push/PR 时自动
 安装 iverilog、跑全量回归、并对整机与板级顶层各做一次编译门禁。
+
+---
+
+## 实测：综合 / 实现 / 上板时序（Vivado 2025.2）
+
+目标板 **依元素 EES-331**（`xc7z020clg484-1`）。板载给 PL 的时钟是 **100MHz**
+（`FPGA_CLK0`，引脚 M19），而本设计实测 Fmax 约 **63MHz**，所以板上用
+`MMCME2_BASE` 把 100MHz 分频成 **50MHz** 给 CPU —— 不是直连晶振。
+
+调试方案用**片内 ILA**（`xilinx.com:ip:ila:6.2`，标准 IP 例化，13 根探针、
+深度 2048），调试信号**一个都不引到引脚**，顶层只剩 3 个端口。
+
+| 指标 | 实测值 |
+| --- | --- |
+| 流程 | `synth_1` / `impl_1` / `u_ila_0_synth_1` 全部 **100%**，已出 bitstream |
+| **WNS**（50MHz 域，20ns） | **+4.162 ns**，失败端点 **0 / 27564** |
+| **WHS** | **+0.011 ns**，失败端点 0 / 27548 |
+| TNS / THS / TPWS | 全为 **0**（`All user specified timing constraints are met`） |
+| **Fmax（估算）** | **63.14 MHz** —— 50MHz 下余量约 **26%** |
+| DRC（后布线） | **0 Error、0 Critical Warning** |
+| 资源 | LUT 12677 (23.8%)、FF 14190 (13.3%)、RAMB36 36.5 (26.1%)、DSP48E1 12、**Bonded IOB 3** |
+
+> 引脚从「引出方案」的 105 个降到 **3 个**，代价是约 2.8K LUT / 4.9K FF /
+> 16.5 个 BRAM，以及 Fmax 从 67.95MHz 降到 63.14MHz（ILA 要采样 288 位调试总线）。
+> 完整数据与 9 条实测踩坑见 [`v9/syn/ila_使用说明.md`](./v9/syn/ila_使用说明.md)。
+
+### 复现命令
+
+```powershell
+# 在仓库根目录下的 v9/ 工程里执行（脚本会自行建工程、配 ILA IP、跑到 bitstream）
+cd v9
+
+# 一条命令重建整个工程（建工程 + ILA IP + 综合 + 实现 + bitstream），约 20~40 分钟
+& 'D:\vivado\2025.2\Vivado\bin\vivado.bat' -mode batch -notrace `
+  -source 'vivado_project/build_project_ila.tcl'
+
+# 自检：run 状态、IP 配置、已实现设计能否打开、时序数字、ILA 探针是否连着真信号
+& 'D:\vivado\2025.2\Vivado\bin\vivado.bat' -mode batch -notrace `
+  -source 'vivado_project/verify_project.tcl'
+```
+
+`build_project_ila.tcl` 顶部有两个开关：`DO_SYNTH=0` 可复用已完成的综合只重跑实现，
+`DO_IMPL=0` 只跑到综合（约 5 分钟，用来快速验证 RTL 能否综合过）。
+
+### 两个值得记住的坑
+
+1. **`MMCME2_BASE` 的 `CLKFBIN` 漏接** —— 只给一条容易被忽略的
+   `WARNING: [Synth 8-7071] port 'CLKFBIN' ... is unconnected`，但内部反馈环断开，
+   `LOCKED` 恒 0 → CPU 永远停在复位态，上板表现为「什么动静都没有」。
+2. **工程模式与非工程模式不能混用** —— 用 `create_project` 建了工程，却用
+   `synth_design` / `route_design` 在内存里跑完流程，磁盘上不会有 `.runs`/`.srcs`，
+   GUI 里 Design Runs 全灰、点不动。ILA 也应做成标准 IP 例化，而不是
+   `create_debug_core` 内存插桩。详见
+   [`v9/syn/工程打开是黑的_排查与正确用法.md`](./v9/syn/工程打开是黑的_排查与正确用法.md)。
 
 ---
 
@@ -191,10 +253,15 @@ git push -u origin feat/your-topic       # 然后开 Pull Request
 | [`v9/README.md`](./v9/README.md) | **工程总览**：做了什么、结构、验证命令、波形/时序图 |
 | [`v9/docs/模块阅读文档.md`](./v9/docs/模块阅读文档.md) | **主文档**：逐模块 I/O、关键信号作用、模块间联系、上板改造三个必知机制、指令走查、一页速查 |
 | [`v9/docs/README.md`](./v9/docs/README.md) | 文档索引与推荐阅读顺序、命名约定 |
+| [`v9/syn/ila_使用说明.md`](./v9/syn/ila_使用说明.md) | **Vivado 实测主报告**：EES-331 引脚表、13 根 ILA 探针、Hardware Manager 触发姿势、时序/资源实测、9 条踩坑 |
+| [`v9/syn/工程打开是黑的_排查与正确用法.md`](./v9/syn/工程打开是黑的_排查与正确用法.md) | 工程模式 vs 非工程模式：为什么 GUI 里 Design Runs 是灰的，以及正确用法 |
+| [`v9/syn/vivado_50mhz_实测.md`](./v9/syn/vivado_50mhz_实测.md) | 早期「调试信号引到引脚」方案的实测记录（对照用） |
 | [`v9/syn/上板改造说明.md`](./v9/syn/上板改造说明.md) | 上板障碍清单（P0~P5）、改造前后对照、6 个 RTL 缺陷的根因 |
 | [`v9/syn/synth_report.md`](./v9/syn/synth_report.md) | Yosys 实测资源报告（MDU 组合版 vs 流水版） |
+| [`v9/vivado_project/README.md`](./v9/vivado_project/README.md) | Vivado 工程脚本说明：目录、开关、一条命令重建、GUI 里能做什么 |
 | [`v9/sim/README_iverilog.md`](./v9/sim/README_iverilog.md) | iverilog 测试台怎么用、plusarg、期望值表、踩过的环境坑 |
 | [`v9/experimental/README.md`](./v9/experimental/README.md) | 时序化 MDU 的验证情况与接入状态 |
+| [`v9/teach/README.md`](./v9/teach/README.md) | 教学波形包：20 个演示程序 + 分阶段 RTL + GTKWave 视图 |
 | [`v9/CPU设计说明.pdf`](./v9/CPU设计说明.pdf) | 上板改造**之前**的设计说明（数据通路图、立即数生成、扩展建议） |
 | [`v9/交付说明.md`](./v9/交付说明.md) | 本次上板改造的交付清单与「本机没能做的部分」 |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | 协作约定：环境、分支、提交、PR、评审、文档同步 |
@@ -207,17 +274,23 @@ git push -u origin feat/your-topic       # 然后开 Pull Request
 
 **已知限制**（都在 [`v9/docs/模块阅读文档.md`](./v9/docs/模块阅读文档.md) §6 / §12 有展开）：
 
-1. **没做真实综合与时序**：`syn/` 里的脚本与约束齐了，但 Fmax/WNS 与实际
-   LUT/FF/BRAM/DSP 占用需要你在有 Vivado 或 yosys 的机器上跑。
+1. **100MHz 目前收敛不了**：50MHz 已收敛且有 26% 余量，但直接跑 100MHz 不行
+   （存在 >10ns 组合通路，瓶颈在布线）。板子是 100MHz 晶振，需经 MMCM 分频。
 2. **`board/sync_mem.sv` 是行为模型**：上板请替换成 `xpm_memory_*` 或厂商 BRAM IP。
-3. **47 条全指令表 difftest 未跑**：需要 verilator + make；现有 103 项是替代回归。
-4. **未做板级实测**：没有比特流，LED/7 段码/UART 的引脚译码还没写。
+   （注：Vivado 综合时 `$readmemh` 初值确实被推断成了 BRAM，见 `syn/ila_使用说明.md`。）
+3. **`CSR.mtval` 从未被写**：v9 的 `mtval` 在 RTL 层面是个死寄存器，综合报
+   `mtval_reg_reg was removed`，所以 ILA 的 probe11 抓不到有效值。**这是待修的 RTL 缺陷**。
+4. **47 条全指令表 difftest 未跑**：需要 verilator + make；现有 103 项是替代回归。
+5. **未做上板跑程序**：bitstream 与 ILA 都已就绪，但还没有在真实板子上跑通程序、
+   也没做 LED / 7 段码 / UART 的引脚译码。
 
 **欢迎认领的方向**（开 Issue 认领即可）：
 
+- 修 `CSR.mtval` 的写入逻辑，让异常现场可观测；
+- 上板跑通程序：烧 bitstream + ILA 抓波形，把实测结果补进文档；
 - 跑 `cdp-tests` 的 47 条全指令表 difftest，把结果补进文档；
-- 用 Vivado/yosys 出真实时序报告，把 `syn/timing_sweep.tcl` 的结果写进 `syn/`；
-- 把 `board/sync_mem.sv` 换成真实 BRAM IP，加 XDC 引脚约束与板级测试；
+- 用 Vivado 做时序收敛优化（当前 Fmax 63MHz），把 `syn/timing_sweep.tcl` 的结果写进 `syn/`；
+- 把 `board/sync_mem.sv` 换成真实 BRAM IP（`xpm_memory_*`），加板级外设与测试；
 - 指令/数据 Cache 的写回策略（当前写直达）与关联度改造；
 - BPU 升级（2-bit BTB → 更深的 gshare/局部历史混合）；
 - 约束随机验证（cocotb / SystemVerilog 断言 / 形式化）。
