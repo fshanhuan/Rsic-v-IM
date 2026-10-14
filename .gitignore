@@ -95,3 +95,7 @@ incremental_db/
 __pycache__/
 _ees331_pages/
 dfx_runtime.txt
+# ---- 厂商文档（仅作本地参考，不入库）----
+# EES-331 用户手册是依元素科技的厂商资料，本仓库未指定许可证，
+# 不随仓库再分发；引脚信息已整理进 v9/syn/ila_使用说明.md 与 v9_board_ila.xdc。
+参考文献EES331_UserManual_v1.0_1220.pdf
