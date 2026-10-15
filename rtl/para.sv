@@ -1,0 +1,175 @@
+/* =============================================================================
+ * para.sv — BigBird v9 全局参数与编码约定
+ * -----------------------------------------------------------------------------
+ * 这里集中定义整颗 CPU 用到的“公共契约”，其它模块只通过宏名互相协作，
+ * 避免在 IDU / EXU / ALU 各处散落魔法数字。
+ *
+ *   1. opcode   ：7 位主操作码，决定指令属于哪一大类。
+ *   2. alu_op   ：5 位 ALU/MDU 运算编码，IDU 译码后交给 EXU 解释执行。
+ *   3. 汇编器约定：cache / 分支预测 / CSR 的相关参数。
+ *
+ * 注意：v9 在 v8（RV32I）基础上扩展为 RV32IM：
+ *   - 整数基址指令仍走原有 ALU 通路；
+ *   - 乘除法新增 MDU，运算编码在 alu_op 高位置 1 区分（见下）。
+ *
+ * ★ 改这里等于改跨模块契约：带位宽的宏（ICACHE/DCACHE/BP 的 INDEX/TAG/HIST、
+ *   MTIME_DIV_DEFAULT、NOP）会同时挪动几个模块的位切片与计时行为，改完要全局搜。
+ * =========================================================================== */
+`ifndef PARA_SV
+`define PARA_SV
+
+/* ------------------------------- 主操作码 ---------------------------------- */
+`define R_opcode   7'b0110011   // R-type：整数寄存器-寄存器运算（含 M 扩展）
+`define I0_opcode  7'b0000011   // I-type load：lb/lh/lw/lbu/lhu
+`define I1_opcode  7'b0010011   // I-type 立即数运算：addi...
+`define I2_opcode  7'b1100111   // jalr
+`define S_opcode   7'b0100011   // store：sb/sh/sw
+`define B_opcode   7'b1100011   // 分支：beq/bne/blt/bge/bltu/bgeu
+`define U0_opcode  7'b0110111   // lui
+`define U1_opcode  7'b0010111   // auipc
+`define J_opcode   7'b1101111   // jal
+`define SYS_opcode 7'b1110011   // 系统：ecall/mret/CSR
+`define MISC_opcode 7'b0001111  // MISC-MEM：fence / fence.i（v9 修复 C4 新增：
+                                //   原来没地方检查这个 opcode，会被当未知指令丢掉）
+
+/* ------------------------- R 型 funct7 区分位 ------------------------------ */
+`define funct7_base 7'b0000000     // 普通 RV32I 整数运算
+`define funct7_sub  7'b0100000     // sub/sra
+`define funct7_m    7'b0000001     // RV32M 乘除法
+
+/* ------------------------------- ALU 编码 ----------------------------------
+ * 5 位编码：[4] 为 1 表示“走 MDU（乘除法）”，否则走普通 ALU 数据通路。
+ * 这样 IDU 只需输出一个统一的操作码，EXU 依据最高位选择执行单元即可。
+ * ------------------------------------------------------------------------- */
+// ---- 基础整数运算（走 ALU）----
+`define alu_add                 5'b00000
+`define alu_sub                 5'b00001
+`define alu_or                  5'b00010
+`define alu_and                 5'b00011
+`define alu_xor                 5'b00100
+`define alu_signed_comparator   5'b00101
+`define alu_unsigned_comparator 5'b00110
+`define alu_equal               5'b00111
+`define alu_sll                 5'b01000
+`define alu_srl                 5'b01001
+`define alu_sra                 5'b01010
+
+// ---- RV32M 乘除法（走 MDU）----
+`define alu_mul                 5'b10000   // 有符号/无符号低 32 位相同
+`define alu_mulh                5'b10001   // 有符号 × 有符号，取高 32 位
+`define alu_mulhsu              5'b10010   // 有符号 × 无符号，取高 32 位
+`define alu_mulhu               5'b10011   // 无符号 × 无符号，取高 32 位
+`define alu_div                 5'b10100   // 有符号除法
+`define alu_divu                5'b10101   // 无符号除法
+`define alu_rem                 5'b10110   // 有符号取余
+`define alu_remu                5'b10111   // 无符号取余
+
+/* -------------------------- 访存宽度（funct3） ------------------------------ */
+`define mem_f3_sb  3'b000
+`define mem_f3_sh  3'b001
+`define mem_f3_sw  3'b010
+`define mem_f3_lb  3'b000
+`define mem_f3_lh  3'b001
+`define mem_f3_lw  3'b010
+`define mem_f3_lbu 3'b100
+`define mem_f3_lhu 3'b101
+
+/* ------------------------------- CSR 地址 ---------------------------------- */
+// RISC-V 特权规范的标准 12 位 CSR 编号（300/301/304/305/340~344/f11/f12）。
+`define CSR_mstatus 12'h300
+`define CSR_misa    12'h301
+`define CSR_mie     12'h304
+`define CSR_mtvec   12'h305
+`define CSR_mscratch 12'h340
+`define CSR_mepc    12'h341
+`define CSR_mcause  12'h342
+`define CSR_mtval   12'h343
+`define CSR_mip     12'h344
+`define CSR_mvendorid 12'hf11
+`define CSR_marchid   12'hf12
+// 教学用自定义定时器 CSR（标准 mtime/mtimecmp 属 CLINT 内存映射，这里并入 CSR 便于观察）
+`define CSR_mtime    12'h7c0
+`define CSR_mtimecmp 12'h7c1
+
+/* -------------------- CSR 写使能位（csr_wen 的位映射） ---------------------- */
+// CSRW_* 是 myCPU 内部 `csr_wen` 总线的**位序号**（不是地址）：写侧用
+// (1 << `CSRW_XXX) 选寄存器，如 ecall 置 bit0|bit1 = 写 mepc + mcause。
+// mtime 只读没有对应位；mtval 由异常类型编码（EXC_*）驱动。
+`define CSRW_MEPC     0
+`define CSRW_MCAUSE   1
+`define CSRW_MSTATUS  2
+`define CSRW_MTVEC    3
+`define CSRW_MIE      4
+`define CSRW_MIP      5
+`define CSRW_MSCRATCH 6
+`define CSRW_MTIMECMP 7
+
+/* ------------------------------ 中断相关位 -------------------------------- */
+// mstatus
+`define MSTATUS_MIE   3           // 全局中断使能
+`define MSTATUS_MPIE  7           // 中断前的 MIE 备份
+// mie / mip
+`define IRQ_MSI  0                // 机器软件中断
+`define IRQ_MTI  7                // 机器定时器中断
+`define IRQ_MEI  11               // 机器外部中断
+// mcause：最高位 1 表示中断，0 表示异常
+`define MCAUSE_INTR_BIT 31
+// ---- 异常（mcause 最高位为 0）----
+// v9 修复（C4）：补齐"非法/异常"这一类，并给异常入口一个统一的编码约定。
+`define MCAUSE_IADDR_MISALIGN 0     // instruction address misaligned
+`define MCAUSE_ILLEGAL_INST    2     // illegal instruction
+`define MCAUSE_BREAKPOINT      3     // breakpoint（本核未实现 ebreak，保留编码）
+`define MCAUSE_LOAD_MISALIGN   4     // load address misaligned
+`define MCAUSE_STORE_MISALIGN  6     // store/AMO address misaligned
+`define MCAUSE_ECALL_M         11    // ecall from M-mode
+// ---- 中断 ----
+`define MCAUSE_MTI      (`MCAUSE_INTR_BIT | `IRQ_MTI)
+`define MCAUSE_MSI      (`MCAUSE_INTR_BIT | `IRQ_MSI)
+`define MCAUSE_MEI      (`MCAUSE_INTR_BIT | `IRQ_MEI)
+
+/* ------------------------------ 定时器参数 -------------------------------- */
+// v9 修复（C7）：mtime 原来每拍 +1（比真实时间快约 1000 万倍），只能当"拍数计数器"。
+//   现在按 (100MHz / MTIME_DIV) 分频递增；默认 100 → 1MHz（每 1us 加 1），
+//   置 1 则退回"每拍 +1"的旧行为（回归脚本用得到）。
+`define MTIME_DIV_DEFAULT 100
+
+/* --------------------------- 异常类型编码（ID/EX 内部用） ------------------ */
+// Control 用这 4 位告诉 CSR"本拍发生的是哪种异常"，CSR 据此写 mcause/mtval。
+//   bit0 : 非法指令        (mcause=2,  mtval=faulting instruction)
+//   bit1 : load 非对齐     (mcause=4,  mtval=faulting address)
+//   bit2 : store 非对齐    (mcause=6,  mtval=faulting address)
+//   bit3 : 指令地址非对齐  (mcause=0,  mtval=faulting target)
+// ecall 不在这里（它有自己的通道，语义是"正常流到 WB 再写 CSR"）。
+// 这 4 个宏是**独热位**（不是序号）：可同时置多位表示多类异常并存。
+`define EXC_NONE        4'b0000
+`define EXC_ILLEGAL     4'b0001
+`define EXC_LOAD_MIS    4'b0010
+`define EXC_STORE_MIS   4'b0100
+`define EXC_IADDR_MIS   4'b1000
+
+/* --------------------------- Cache / 预测器参数 ---------------------------- */
+// I-Cache：直接映射，行大小 = 1 个字（教学用，便于观察命中/缺失），因此没有 offset；
+// 切片：index = cpu_addr[INDEX_BITS+1:2]（跳过低 2 位字节偏移），tag 是剩下的高位。
+`define ICACHE_INDEX_BITS 6       // 64 行
+`define ICACHE_TAG_BITS   (32 - `ICACHE_INDEX_BITS - 2)
+`define DCACHE_INDEX_BITS 6       // 64 行
+`define DCACHE_TAG_BITS   (32 - `DCACHE_INDEX_BITS - 2)
+
+// 分支预测：gshare（PC 低位 XOR 全局历史 GHR）+ BTB，直接映射
+//   BP_INDEX_BITS：PHT（2 位饱和计数器表）与 BTB 的行数 = 1 << BP_INDEX_BITS，
+//     同时是 PC 切片宽度 fpc_idx = fetch_pc[BP_INDEX_BITS+1:2]；
+//     BP_TAG_BITS 是 BTB 标签宽度（公式同上，一对一缓存“这条 PC 的跳转目标”）。
+//   BP_HIST_BITS：GHR 位宽，与索引位宽一致，所以 XOR 后仍是 BP_INDEX_BITS 位。
+`define BP_INDEX_BITS 6           // 64 项计数表 / BTB
+`define BP_TAG_BITS   (32 - `BP_INDEX_BITS - 2)
+`define BP_HIST_BITS  6           // 全局历史长度（与索引位宽一致，XOR 后仍为 6 位）
+
+/* ------------------------------ 性能计数开关 ------------------------------ */
+`define Performance_Count
+
+// ★ 不变量：`NOP 必须就是 addi x0,x0,0（32'h00000013），后级要能把它当**合法空操作**
+//   执行掉：它既是 IFU 在 valid=0 时灌给 IDU 的“泡”，也是冲刷时填进流水寄存器的
+//   占位指令；换成别的指令就会让冲刷/停拍路径产生副作用（写寄存器 / 触发异常）。
+`define NOP 32'h00000013
+
+`endif // PARA_SV

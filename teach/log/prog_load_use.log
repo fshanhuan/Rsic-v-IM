@@ -1,0 +1,122 @@
+==============================================================
+ v9 iverilog regression testbench  tb_iverilog
+   program file : prog_load_use.hex
+   expectation  : prog_id=4 (checking enabled)
+   max cycles   : 4000   clock 10ns (100MHz)
+==============================================================
+[TB] 讲解版(verilator)：悬空 input 默认接 0，无需 force
+[TB] workaround: register file has no reset; preloaded rf[0:31]=0 (power-up value)
+[TB] reset released at cycle boundary, start running...
+[WB ] cyc=13 pc=00000000 inst=000020b7 lui ena=1 reg=x1 val=00002000
+[WB ] cyc=18 pc=00000004 inst=40008093 addi ena=1 reg=x1 val=00002400
+[WB ] cyc=23 pc=00000008 inst=11223137 lui ena=1 reg=x2 val=11223000
+[WB ] cyc=28 pc=0000000c inst=34410113 addi ena=1 reg=x2 val=11223344
+[ST ] cyc=32 addr=00002400 mask=10 wdata=11223344
+[WB ] cyc=33 pc=00000010 inst=0020a023 sw ena=0 reg=x0 val=00002400
+[WB ] cyc=40 pc=00000014 inst=0000a183 lw ena=1 reg=x3 val=11223344
+[WB ] cyc=45 pc=00000018 inst=00218233 add ena=1 reg=x4 val=22446688
+[WB ] cyc=49 pc=0000001c inst=403202b3 sub ena=1 reg=x5 val=11223344
+[WB ] cyc=54 pc=00000020 inst=0000c303 lbu ena=1 reg=x6 val=00000044
+[WB ] cyc=59 pc=00000024 inst=003373b3 and ena=1 reg=x7 val=00000044
+[WB ] cyc=64 pc=00000028 inst=00209403 lh ena=1 reg=x8 val=00001122
+[WB ] cyc=69 pc=0000002c inst=007464b3 or ena=1 reg=x9 val=00001166
+[WB ] cyc=74 pc=00000030 inst=0000a503 lw ena=1 reg=x10 val=11223344
+[RDR] cyc=75 dnpc=00000048 mispredict=1 ecall=0 mret=0 intr=0
+[WB ] cyc=79 pc=00000034 inst=00250a63 beq ena=0 reg=x20 val=00000001
+[WB ] cyc=88 pc=00000048 inst=000065b7 lui ena=1 reg=x11 val=00006000
+[WB ] cyc=94 pc=0000004c inst=00d58593 addi ena=1 reg=x11 val=0000600d
+[WB ] cyc=99 pc=00000050 inst=0000a683 lw ena=1 reg=x13 val=11223344
+[ST ] cyc=103 addr=00002408 mask=10 wdata=11223344
+[WB ] cyc=104 pc=00000054 inst=00d0a423 sw ena=0 reg=x8 val=00002408
+[WB ] cyc=111 pc=00000058 inst=0080a703 lw ena=1 reg=x14 val=11223344
+[WB ] cyc=116 pc=0000005c inst=00d707b3 add ena=1 reg=x15 val=22446688
+[WB ] cyc=120 pc=00000060 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=125 pc=00000064 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=130 pc=00000068 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=135 pc=0000006c inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=140 pc=00000070 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=145 pc=00000074 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=150 pc=00000078 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=155 pc=0000007c inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=160 pc=00000080 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=165 pc=00000084 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=170 pc=00000088 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=175 pc=0000008c inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=180 pc=00000090 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=185 pc=00000094 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=190 pc=00000098 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=195 pc=0000009c inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=200 pc=000000a0 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=205 pc=000000a4 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=210 pc=000000a8 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=215 pc=000000ac inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=220 pc=000000b0 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=225 pc=000000b4 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=230 pc=000000b8 inst=00000013 addi ena=1 reg=x0 val=00000000
+[RDR] cyc=234 dnpc=00000000 mispredict=0 ecall=1 mret=0 intr=0
+[END] ecall reached ID at cyc=234 id_pc=000000c0 (snapshot after DRAIN=8 cycles)
+[WB ] cyc=235 pc=000000bc inst=00000013 addi ena=1 reg=x0 val=00000000
+
+==================== WRITEBACK EVENT SUMMARY ====================
+  wb events (dedup)   = 44
+  wb repeats removed  = 1  (same event held over stall cycles)
+  store accesses      = 2
+  load  accesses      = 28
+  IFU_stall cycles    = 100
+  redirects (dnpc)    = 2
+  ecall decoded at cyc= 234  (stop after DRAIN=8)
+
+==================== GPR SNAPSHOT x0..x31 ====================
+  (hier path: u_cpu.IDU_Inst0.Reg_Stack_inst0.Reg_inst.rf[])
+  x0  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x1  = 0x00002400  (9216)   [PASS]  exp=0x00002400
+  x2  = 0x11223344  (287454020)   [PASS]  exp=0x11223344
+  x3  = 0x11223344  (287454020)   [PASS]  exp=0x11223344
+  x4  = 0x22446688  (574908040)   [PASS]  exp=0x22446688
+  x5  = 0x11223344  (287454020)   [PASS]  exp=0x11223344
+  x6  = 0x00000044  (68)   [PASS]  exp=0x00000044
+  x7  = 0x00000044  (68)   [PASS]  exp=0x00000044
+  x8  = 0x00001122  (4386)   [PASS]  exp=0x00001122
+  x9  = 0x00001166  (4454)   [PASS]  exp=0x00001166
+  x10  = 0x11223344  (287454020)   [PASS]  exp=0x11223344
+  x11  = 0x0000600d  (24589)   [PASS]  exp=0x0000600d
+  x12  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x13  = 0x11223344  (287454020)   [PASS]  exp=0x11223344
+  x14  = 0x11223344  (287454020)   [PASS]  exp=0x11223344
+  x15  = 0x22446688  (574908040)   [PASS]  exp=0x22446688
+  x16  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x17  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x18  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x19  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x20  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x21  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x22  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x23  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x24  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x25  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x26  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x27  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x28  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x29  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x30  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x31  = 0x00000000  (0)   [PASS]  exp=0x00000000
+
+==================== CSR / MEMORY ====================
+  mepc     = 0x000000c0
+  mcause   = 0x0000000b   (11 = ecall exception)
+  mstatus  = 0x00001800
+  mtvec    = 0x00000000
+  dram[0x1000] = 0x00000000
+  ICache: hit=144 miss=48
+  DCache: hit=22 miss=2
+  BPU   : pred=1 hit=0 miss=1
+
+============ v9 BOARD-READINESS CHECKS (new) ============
+  write-once (store not repeated)   [PASS]
+  fetch-align (pc<->inst coherent)  [PASS]
+
+==================== RESULT ====================
+  total cycles = 241
+[SELFCHECK] status=PASS  (34/34 checks passed)
+===============================================
+- tb_iverilog.sv:586: Verilog $finish

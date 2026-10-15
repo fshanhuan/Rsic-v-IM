@@ -1,0 +1,84 @@
+==============================================================
+ v9 iverilog regression testbench  tb_iverilog
+   program file : prog_div.hex
+   expectation  : prog_id=2 (checking enabled)
+   max cycles   : 4000   clock 10ns (100MHz)
+==============================================================
+[TB] workaround: register file has no reset; preloaded rf[0:31]=0 (power-up value)
+[TB] reset released at cycle boundary, start running...
+[WB ] cyc=13 pc=00000000 inst=06400113 addi ena=1 reg=x2 val=00000064
+[WB ] cyc=18 pc=00000004 inst=00700193 addi ena=1 reg=x3 val=00000007
+[WB ] cyc=125 pc=00000008 inst=02314233 div ena=1 reg=x4 val=0000000e
+[WB ] cyc=230 pc=0000000c inst=023142b3 div ena=1 reg=x5 val=0000000e
+[WB ] cyc=231 pc=00000010 inst=02314333 div ena=1 reg=x6 val=0000000e
+[WB ] cyc=232 pc=00000014 inst=023143b3 div ena=1 reg=x7 val=0000000e
+[WB ] cyc=233 pc=00000018 inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=235 pc=0000001c inst=00000013 addi ena=1 reg=x0 val=00000000
+[WB ] cyc=237 pc=00000020 inst=00000013 addi ena=1 reg=x0 val=00000000
+[RDR] cyc=241 dnpc=00000000 mispredict=0 ecall=1 mret=0 intr=0
+[END] ecall reached ID at cyc=241 id_pc=00000028 (snapshot after DRAIN=8 cycles)
+[WB ] cyc=242 pc=00000024 inst=00000013 addi ena=1 reg=x0 val=00000000
+
+==================== WRITEBACK EVENT SUMMARY ====================
+  wb events (dedup)   = 10
+  wb repeats removed  = 34  (same event held over stall cycles)
+  store accesses      = 0
+  load  accesses      = 0
+  IFU_stall cycles    = 221
+  redirects (dnpc)    = 1
+  ecall decoded at cyc= 241  (stop after DRAIN=8)
+
+==================== GPR SNAPSHOT x0..x31 ====================
+  (hier path: u_cpu.IDU_Inst0.Reg_Stack_inst0.Reg_inst.rf[])
+  x0  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x1  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x2  = 0x00000064  (100)   [PASS]  exp=0x00000064
+  x3  = 0x00000007  (7)   [PASS]  exp=0x00000007
+  x4  = 0x0000000e  (14)   [PASS]  exp=0x0000000e
+  x5  = 0x0000000e  (14)   [PASS]  exp=0x0000000e
+  x6  = 0x0000000e  (14)   [PASS]  exp=0x0000000e
+  x7  = 0x0000000e  (14)   [PASS]  exp=0x0000000e
+  x8  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x9  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x10  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x11  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x12  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x13  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x14  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x15  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x16  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x17  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x18  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x19  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x20  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x21  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x22  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x23  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x24  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x25  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x26  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x27  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x28  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x29  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x30  = 0x00000000  (0)   [PASS]  exp=0x00000000
+  x31  = 0x00000000  (0)   [PASS]  exp=0x00000000
+
+==================== CSR / MEMORY ====================
+  mepc     = 0x00000028
+  mcause   = 0x0000000b   (11 = ecall exception)
+  mstatus  = 0x00001800
+  mtvec    = 0x00000000
+  dram[0x1000] = 0x00000000
+  ICache: hit=221 miss=13
+  DCache: hit=0 miss=0
+  BPU   : pred=0 hit=0 miss=0
+
+============ v9 BOARD-READINESS CHECKS (new) ============
+  write-once (store not repeated)   [PASS]
+  fetch-align (pc<->inst coherent)  [PASS]
+
+==================== RESULT ====================
+  total cycles = 248
+[SELFCHECK] status=PASS  (34/34 checks passed)
+===============================================
+- tb_iverilog.sv:566: Verilog $finish

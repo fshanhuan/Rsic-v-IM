@@ -1,0 +1,111 @@
+﻿Reading E:/FPGA/ModelSim_10.5se/tcl/vsim/pref.tcl
+
+# 10.5
+
+# vsim -c -quiet -suppress 7061 -L work work.tb_msim "+prog=sim/prog_mul.hex" "+prog_id=1" "+max=600" "+no_wbu_force" "+raw_rf" -do "run -all; quit -f" 
+# Start time: 21:54:44 on Oct 10,2026
+# ** Note: (vsim-8009) Loading existing optimized design _opt
+# //  ModelSim SE-64 10.5 Feb 13 2016 
+# //
+# //  Copyright 1991-2016 Mentor Graphics Corporation
+# //  All Rights Reserved.
+# //
+# //  ModelSim SE-64 and its associated documentation contain trade
+# //  secrets and commercial or financial information that are the property of
+# //  Mentor Graphics Corporation and are privileged, confidential,
+# //  and exempt from disclosure under the Freedom of Information Act,
+# //  5 U.S.C. Section 552. Furthermore, this information
+# //  is prohibited from disclosure under the Trade Secrets Act,
+# //  18 U.S.C. Section 1905.
+# //
+# run -all
+# ==============================================================
+#  v9 iverilog regression testbench  tb_iverilog
+#    program file : sim/prog_mul.hex
+#    expectation  : prog_id=1 (checking enabled)
+#    max cycles   : 600   clock 10ns (100MHz)
+# ==============================================================
+# [TB] reset released at cycle boundary, start running...
+# [WB ] cyc=14 pc=00000000 inst=00500113 addi ena=1 reg=x2 val=00000005
+# [WB ] cyc=19 pc=00000004 inst=00700193 addi ena=1 reg=x3 val=00000007
+# [WB ] cyc=28 pc=00000008 inst=023102b3 mul ena=1 reg=x5 val=00000023
+# [WB ] cyc=33 pc=0000000c inst=02310433 mul ena=1 reg=x8 val=00000023
+# [WB ] cyc=38 pc=00000010 inst=023104b3 mul ena=1 reg=x9 val=00000023
+# [WB ] cyc=43 pc=00000014 inst=02310533 mul ena=1 reg=x10 val=00000023
+# [WB ] cyc=48 pc=00000018 inst=023105b3 mul ena=1 reg=x11 val=00000023
+# [WB ] cyc=53 pc=0000001c inst=02310633 mul ena=1 reg=x12 val=00000023
+# [WB ] cyc=58 pc=00000020 inst=023106b3 mul ena=1 reg=x13 val=00000023
+# [WB ] cyc=63 pc=00000024 inst=02310733 mul ena=1 reg=x14 val=00000023
+# [WB ] cyc=66 pc=00000028 inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=70 pc=0000002c inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=75 pc=00000030 inst=00000013 addi ena=1 reg=x0 val=00000000
+# [RDR] cyc=79 dnpc=00000000 mispredict=0 ecall=1 mret=0 intr=0
+# [END] ecall reached ID at cyc=79 id_pc=00000038 (snapshot after DRAIN=8 cycles)
+# [WB ] cyc=80 pc=00000034 inst=00000013 addi ena=1 reg=x0 val=00000000
+# 
+# ==================== WRITEBACK EVENT SUMMARY ====================
+#   wb events (dedup)   = 14
+#   wb repeats removed  = 14  (same event held over stall cycles)
+#   store accesses      = 0
+#   load  accesses      = 0
+#   IFU_stall cycles    = 45
+#   redirects (dnpc)    = 1
+#   ecall decoded at cyc= 79  (stop after DRAIN=8)
+# 
+# ==================== GPR SNAPSHOT x0..x31 ====================
+#   (hier path: u_cpu.IDU_Inst0.Reg_Stack_inst0.Reg_inst.rf[])
+#   x0  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x1  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x2  = 0x00000005  (5)   [PASS]  exp=0x00000005
+#   x3  = 0x00000007  (7)   [PASS]  exp=0x00000007
+#   x4  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x5  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x6  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x7  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x8  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x9  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x10  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x11  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x12  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x13  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x14  = 0x00000023  (35)   [PASS]  exp=0x00000023
+#   x15  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x16  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x17  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x18  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x19  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x20  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x21  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x22  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x23  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x24  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x25  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x26  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x27  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x28  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x29  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x30  = 0x00000000  (0)   [PASS]  exp=0x00000000
+#   x31  = 0x00000000  (0)   [PASS]  exp=0x00000000
+# 
+# ==================== CSR / MEMORY ====================
+#   mepc     = 0x00000038
+#   mcause   = 0x0000000b   (11 = ecall exception)
+#   mstatus  = 0x00001800
+#   mtvec    = 0x00000000
+#   dram[0x1000] = 0x00000000
+#   ICache: hit=50 miss=17
+#   DCache: hit=0 miss=0
+#   BPU   : pred=0 hit=0 miss=0
+# 
+# ============ v9 BOARD-READINESS CHECKS (new) ============
+#   write-once (store not repeated)   [PASS]
+#   fetch-align (pc<->inst coherent)  [PASS]
+# 
+# ==================== RESULT ====================
+#   total cycles = 86
+# [SELFCHECK] status=PASS  (34/34 checks passed)
+# ===============================================
+# ** Note: $finish    : sim/tb_msim.sv(577)
+#    Time: 930 ns  Iteration: 1  Instance: /tb_msim
+# End time: 21:54:45 on Oct 10,2026, Elapsed time: 0:00:01
+# Errors: 0, Warnings: 0

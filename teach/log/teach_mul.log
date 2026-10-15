@@ -1,0 +1,80 @@
+==============================================================
+ v9 iverilog regression testbench  tb_iverilog
+   program file : teach_mul.hex
+   expectation  : prog_id=9 (no reference, measured only)
+   max cycles   : 4000   clock 10ns (100MHz)
+==============================================================
+[TB] 讲解版(verilator)：悬空 input 默认接 0，无需 force
+[TB] workaround: register file has no reset; preloaded rf[0:31]=0 (power-up value)
+[TB] reset released at cycle boundary, start running...
+[WB ] cyc=13 pc=00000000 inst=00600093 addi ena=1 reg=x1 val=00000006
+[WB ] cyc=18 pc=00000004 inst=00700113 addi ena=1 reg=x2 val=00000007
+[WB ] cyc=25 pc=00000008 inst=022081b3 mul ena=1 reg=x3 val=0000002a
+[WB ] cyc=32 pc=0000000c inst=02318233 mul ena=1 reg=x4 val=000006e4
+[RDR] cyc=38 dnpc=00000000 mispredict=0 ecall=1 mret=0 intr=0
+[END] ecall reached ID at cyc=38 id_pc=00000014 (snapshot after DRAIN=8 cycles)
+[WB ] cyc=39 pc=00000010 inst=022092b3 mulh ena=1 reg=x5 val=00000000
+
+==================== WRITEBACK EVENT SUMMARY ====================
+  wb events (dedup)   = 5
+  wb repeats removed  = 0  (same event held over stall cycles)
+  store accesses      = 0
+  load  accesses      = 0
+  IFU_stall cycles    = 22
+  redirects (dnpc)    = 1
+  ecall decoded at cyc= 38  (stop after DRAIN=8)
+
+==================== GPR SNAPSHOT x0..x31 ====================
+  (hier path: u_cpu.IDU_Inst0.Reg_Stack_inst0.Reg_inst.rf[])
+  x0  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x1  = 0x00000006  (6)   [MEASURED]  (no reference values)
+  x2  = 0x00000007  (7)   [MEASURED]  (no reference values)
+  x3  = 0x0000002a  (42)   [MEASURED]  (no reference values)
+  x4  = 0x000006e4  (1764)   [MEASURED]  (no reference values)
+  x5  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x6  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x7  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x8  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x9  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x10  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x11  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x12  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x13  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x14  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x15  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x16  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x17  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x18  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x19  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x20  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x21  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x22  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x23  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x24  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x25  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x26  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x27  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x28  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x29  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x30  = 0x00000000  (0)   [MEASURED]  (no reference values)
+  x31  = 0x00000000  (0)   [MEASURED]  (no reference values)
+
+==================== CSR / MEMORY ====================
+  mepc     = 0x00000014
+  mcause   = 0x0000000b   (11 = ecall exception)
+  mstatus  = 0x00001800
+  mtvec    = 0x00000000
+  dram[0x1000] = 0x00000000
+  ICache: hit=28 miss=8
+  DCache: hit=0 miss=0
+  BPU   : pred=0 hit=0 miss=0
+
+============ v9 BOARD-READINESS CHECKS (new) ============
+  write-once (store not repeated)   [PASS]
+  fetch-align (pc<->inst coherent)  [PASS]
+
+==================== RESULT ====================
+  total cycles = 45
+[SELFCHECK] status=NO_EXPECTATION  (measured values only)
+===============================================
+- tb_iverilog.sv:586: Verilog $finish

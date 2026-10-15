@@ -36,14 +36,36 @@ obj_dir/
 *.twx
 *.pb
 usage_statistics_webtalk.*
+# 备份日志（build_project_ila_12345.backup.log 之类）
+*.backup.log
+*.backup.jou
+build_console.txt
+
+# ---- v9 上板工程的生成物（脚本可完整重建，见 README §3）----
+v9_ila/
+project_src/
+dfx_runtime.txt
+
+# ---- 板上 ILA 抓取结果与推断产物（体积大、可重跑得到）----
+ila_*.csv
+ila_*.analysis.txt
+ila_*.check.txt
+ila_*.summary.json
+
+# ---- 一次性实验脚手架（保留在作者本机，不入库）----
+_deprecated/
+_diag/
+_fw/
+_comment_iter/
+_ila_crops/
+_repo_clone/
 
 # ---- yosys ----
 *.ys.out
 *.json
 !package.json
 
-# ---- 打包快照（v9.zip 是 v9/ 的重复打包件，不入库，避免仓库里出现"仓库的压缩包"）----
-v9.zip
+# ---- 打包快照 ----
 *.zip
 
 # ---- 编辑器 / 系统 ----
@@ -63,39 +85,13 @@ venv/
 
 # ---- 注意 ----
 # wave/*.vcd 与 figures/*.svg 是**刻意入库**的：它们是模块阅读文档里引用到的
-# 可视证据（上板改造后的时序图），体积也不大（合计 < 500KB）。
-# 若要重新生成，见 v9/README.md 的「波形 / 时序图」一节。
-
-# ---- Quartus（综合/适配/时序的中间产物一律不入库）----
-quartus/build/db/
-quartus/build/incremental_db/
-quartus/build/output_files*/
-*.qws
-*.summary
-*.smsg
-*.pin
-*.rpt
-*.sof
-*.pof
-*.rpd
-*.jdi
-
-# ---- ModelSim（work 库与 transcript 是仿真中间产物）----
-work/
-msim/work/
-transcript
-modelsim.ini
-
-# ---- 追加（v9 上板/Vivado 实测阶段）：修正子目录下失效的忽略模式 ----
-# 说明：上面 `quartus/build/db/` 这类写法是**根目录锚定**的，在 v9/ 子目录里不生效，
-#       于是 v9/quartus/build/db 与 incremental_db 这 79MB 中间产物会被当成待入库文件。
-#       这里补上不锚定的模式（含 vivado_project/_ees331_pages 的 4.6MB 页图与 py 缓存）。
-db/
-incremental_db/
-__pycache__/
-_ees331_pages/
-dfx_runtime.txt
-# ---- 厂商文档（仅作本地参考，不入库）----
-# EES-331 用户手册是依元素科技的厂商资料，本仓库未指定许可证，
-# 不随仓库再分发；引脚信息已整理进 v9/syn/ila_使用说明.md 与 v9_board_ila.xdc。
-参考文献EES331_UserManual_v1.0_1220.pdf
+# 可视证据（上板改造后的时序图），体积也不大（合计 < 3MB）。
+# 若要重新生成，见 README 的「波形 / 时序图」相关章节。
+#
+# 下面三条是**对上面 `*.log` 的例外**：msim/ 与 teach/ 下的仿真日志是
+# 「第二仿真器（ModelSim）验证」与「教学波形包基线」的**证据**，
+# 体积很小（合计 ~100KB），刻意入库；否则 `*.log` 会把它们全部吃掉。
+!msim/logs/*.log
+!msim/logs/*.txt
+!teach/log/*.log
+!teach/log_baseline/*.log
