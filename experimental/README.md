@@ -25,5 +25,5 @@ RV32M 乘除法的**时序化**实现：
 与 `Control` 三处，具体见 [`../syn/上板改造说明.md`](../syn/上板改造说明.md) §3「P1」。
 
 接入后三个程序回归 **103/103 全过**（`sim/run_iverilog.{bat,sh}`）。
-原单拍组合的 [`../MDU.sv`](../MDU.sv) 保留在工程里作为对照，**已不参与构建**——
+原单拍组合的 [`../rtl/MDU.sv`](../rtl/MDU.sv) 保留在工程里作为对照，**已不参与构建**——
 编译时请用 `experimental/MDU_pipelined.sv`。

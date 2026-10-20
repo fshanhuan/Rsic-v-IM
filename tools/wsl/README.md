@@ -70,4 +70,4 @@ wsl -d Ubuntu -e bash /mnt/e/FPGA/v9_vivado_ila/tools/wsl/run_canonical.sh <标�
 | H3 + H1 + H2 | **39 / 39 PASS** |
 
 详见 [`../../README.md`](../../README.md) §4.2 与
-[`../../docs/待修复清单_cdp-tests第三轮.md`](../../docs/待修复清单_cdp-tests第三轮.md)。
+[`../../docs/历史/待修复清单_cdp-tests第三轮.md`](../../docs/历史/待修复清单_cdp-tests第三轮.md)。

@@ -6,7 +6,7 @@ import sys
 from docx import Document
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-name = sys.argv[1] if len(sys.argv) > 1 else "BigBird_RV32_产品报告_v17r1.docx"
+name = sys.argv[1] if len(sys.argv) > 1 else "产品报告_v17.docx"
 path = os.path.join(ROOT, "docs", name)
 print("checking", name)
 doc = Document(path)

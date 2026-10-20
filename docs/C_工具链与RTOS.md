@@ -1,4 +1,4 @@
-# C 工具链 / CoreMark / FreeRTOS（v13）
+# C 工具链 / CoreMark / FreeRTOS（v13 起）
 
 > 一句话：**rv32 工具链在这台机器上跑通了**（无需 sudo、无需 newlib），
 > `hello` / `memtest` 能编能跑；CoreMark 与 FreeRTOS 也已经能编、能跑起来，

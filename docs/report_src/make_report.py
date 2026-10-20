@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 FIG = os.path.join(ROOT, "figures")
 OUT = os.path.join(ROOT, "docs",
-                   os.environ.get("REPORT_OUT", "BigBird_RV32_产品报告_v17.docx"))
+                   os.environ.get("REPORT_OUT", "产品报告_v17.docx"))
 
 NAVY = RGBColor(0x1F, 0x4E, 0x79)
 INK = RGBColor(0x26, 0x26, 0x26)
@@ -1013,7 +1013,7 @@ T(["目录", "内容", "规模"], [
     ["sim/", "16 个自检测试台（含真实 board_top 的监测台）", "—"],
     ["sw/", "shell、测试程序、引导协议、链接脚本与构建脚本", "12 个 C 程序 + 2 个链接脚本 + 19 个脚本"],
     ["_diag/", "编译检查、38 项回归、上板冒烟、load-and-run、Vivado 构建", "26 个脚本（14 PS + 5 SH + 7 PY）"],
-    ["docs/", "检查点、实现说明、验证报告、工具链与 RTOS 文档", "17 份文档"],
+    ["docs/", "开发记录、模块说明、串口/console、CPU 评审、产品报告（历史归档在 docs/历史）", "见 docs/README.md"],
     ["figures/", "本报告三张图与历史配图", "—"],
     ["_bak/", "可回退的比特流与 LTX 备份（v14 / v15 / v16）", "—"],
 ], [2.2, 10.0, 4.2], align=["l", "l", "l"], fs=8.5, caption="表 26　交付物")
@@ -1089,11 +1089,11 @@ H1("附录 C　数据溯源")
 T(["结论", "证据文件"], [
     ["CoreMark 128.82 iter/s、CRCs", "上板串口日志（board_run.ps1 抓取）；镜像 sw/build/cm_*.hex"],
     ["拍数 / 停顿普查 / 误预测", "sim/tb_cm.sv 的 +perf 输出（cyc、load_use、ifu_stall、mdu_busy、mispred）"],
-    ["分支预测扫参、load-use 收益与代价", "docs/CHECKPOINT_v14.md §1 与 §5b；_diag/bp_sweep.sh；_diag/build_boot_v15.log"],
-    ["资源与时序", "project_src/util_post_route.boot.rpt、timing_post_route.boot.rpt；_diag/build_boot_v16.log"],
-    ["P4 缺陷与修复", "docs/CHECKPOINT_v14.md §4；tb_monitor 的 [COUNT]/[RD] 轨迹"],
+    ["分支预测扫参、load-use 收益与代价", "docs/开发记录.md §1 与 §5b；_diag/bp_sweep.sh；_diag/build_boot_v15.log"],
+    ["资源与时序", "_bak/impl_reports/util_post_route.boot.rpt、timing_post_route.boot.rpt；_diag/build_boot_v16.log"],
+    ["P4 缺陷与修复", "docs/开发记录.md §4；tb_monitor 的 [COUNT]/[RD] 轨迹"],
     ["IROM 窗口自检 / load-and-run", "sw/run_dptest.sh；板上 board_smoke.ps1 的 S3；_diag/load_app.ps1 日志"],
-    ["fence.i 更正与 38 项回归", "docs/CHECKPOINT_v14.md §8「★ 更正」；sw/fenceitest.c；_diag/regress.ps1"],
+    ["fence.i 更正与 38 项回归", "docs/开发记录.md §8「★ 更正」；sw/fenceitest.c；_diag/regress.ps1"],
 ], [4.4, 12.0], align=["l", "l"], fs=8.5, caption="表 31　数据溯源")
 
 doc.save(OUT)

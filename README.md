@@ -2,7 +2,7 @@
 
 > **工具链：Vivado 2025.2 / 目标板：依元素 EES-331 / 器件：`xc7z020clg484-1`**
 >
-> 本仓库 = v9 上板工作的完整工程。**核心 RTL 只有一份，在 `rtl/`**；
+> 本仓库 = 完整工程（v9 起，当前 **v17**）。**核心 RTL 只有一份，在 `rtl/`**；
 > 板级件在 `board/`、流水乘除的编译版是 `rtl/MDU_pipelined.sv`；
 > Vivado 综合的和 `sim/run_iverilog.bat` 跑的是**同一份文件**，不会出现副本不同步。
 >
@@ -39,12 +39,12 @@
   应用可以正常 `return` 回 shell——改程序不用重新综合比特流。
 - **性能**：v13.5 → v15 两轮改动把 CoreMark 从 2.335 提到 **2.576 CoreMark/MHz（+10.3%）**；
   `load-use` 停拍 −55%（50 339 → 22 681 拍），总周期 −5.9%。
-- **文档索引**：
-  - 本轮总账：[`docs/CHECKPOINT_v14.md`](docs/CHECKPOINT_v14.md)（分支预测扫参、双读口、load-use 1 拍、MMIO 重复读缺陷、shell、load-and-run）
-  - 前序：[`docs/CHECKPOINT_v12.md`](docs/CHECKPOINT_v12.md)、[`docs/CHECKPOINT_v13.md`](docs/CHECKPOINT_v13.md)、
-    [`docs/IMPLEMENTATION_v10.md`](docs/IMPLEMENTATION_v10.md)、[`docs/IMPLEMENTATION_v11.md`](docs/IMPLEMENTATION_v11.md)
-  - 工具链与 RTOS：[`docs/C_工具链与RTOS.md`](docs/C_工具链与RTOS.md)；串口/GPIO：[`docs/BOOT_UART.md`](docs/BOOT_UART.md)、[`docs/CONSOLE_GPIO.md`](docs/CONSOLE_GPIO.md)
-  - 产品级汇总：[`docs/BigBird_RV32_产品报告_v17.docx`](docs/BigBird_RV32_产品报告_v17.docx)（18 页：规格、关键技术、性能、资源时序、验证、风险与路线图）
+- **文档索引**：全量地图见 [`docs/README.md`](docs/README.md)。
+  - 本轮总账：[`docs/开发记录.md`](docs/开发记录.md)（分支预测扫参、双读口、load-use 1 拍、MMIO 重复读缺陷、shell、load-and-run）
+  - 前序：[`docs/历史/CHECKPOINT_v12.md`](docs/历史/CHECKPOINT_v12.md)、[`docs/历史/CHECKPOINT_v13.md`](docs/历史/CHECKPOINT_v13.md)、
+    [`docs/历史/IMPLEMENTATION_v10.md`](docs/历史/IMPLEMENTATION_v10.md)、[`docs/历史/IMPLEMENTATION_v11.md`](docs/历史/IMPLEMENTATION_v11.md)
+  - 工具链与 RTOS：[`docs/C_工具链与RTOS.md`](docs/C_工具链与RTOS.md)；串口/GPIO：[`docs/串口与console.md`](docs/串口与console.md)
+  - 产品级汇总：[`docs/产品报告_v17.docx`](docs/产品报告_v17.docx)（18 页：规格、关键技术、性能、资源时序、验证、风险与路线图）
 
 ### 0.2 怎么跑（v17）
 
@@ -60,7 +60,7 @@ bash sw/run_dptest.sh
 
 > ⚠️ `_diag/`（一键验收脚本：`regress.ps1` 38 项回归、`board_smoke.ps1` 6 项上板自检、
 > `load_app.ps1` 加载执行）按本仓库既有约定**不入库**；等价的手工命令见
-> `docs/CHECKPOINT_v14.md` §7「一键验收」。
+> `docs/开发记录.md` §7「一键验收」。
 
 **v9 阶段状态（历史，仅作对照；当前状态见 §0）**
 
@@ -212,7 +212,7 @@ start "$REPO/v9_ila/v9_ila.xpr"
 
 | 文档 | 讲什么 |
 | --- | --- |
-| [`docs/待修复清单_cdp-tests第三轮.md`](docs/待修复清单_cdp-tests第三轮.md) | ★ **官方差分（`cdp-tests`）发现并已修复的 H1/H2/H3**：现象、根因、分步实测（0/39 → 32/39 → 39/39）、以及"47 条"这个数字为什么对不上 |
+| [`docs/历史/待修复清单_cdp-tests第三轮.md`](docs/历史/待修复清单_cdp-tests第三轮.md) | ★ **官方差分（`cdp-tests`）发现并已修复的 H1/H2/H3**：现象、根因、分步实测（0/39 → 32/39 → 39/39）、以及"47 条"这个数字为什么对不上 |
 | [`tools/wsl/README.md`](tools/wsl/README.md) | **在 WSL 里跑官方差分**：无 sudo 装 Verilator 5.020、克隆上游套件、一键跑 39 条；含脚本清单与两个必踩的坑 |
 | [`syn/修复史_全量.md`](syn/修复史_全量.md) | ★ **注释迭代的归档**（220 KB / 138 个主题）：RTL 里被压缩掉的故障战史、实测现象、方案沿革**逐字原文**。RTL 注释里的 `见 syn/修复史_全量.md §XXX-n` 就指向这里 |
 | [`docs/vivado/ecall重定向故障_根因与修复.md`](docs/vivado/ecall重定向故障_根因与修复.md) | ★ **v9 B9**：板上 ILA 抓出的 `ecall` 重定向失败 —— 逐拍证据、仿真复现、根因（`dnpc_flag & ready`）、修复与新增回归断言。**想知道"为什么 35/35 全过还有 bug"就读这篇** |
@@ -221,14 +221,14 @@ start "$REPO/v9_ila/v9_ila.xpr"
 | [`docs/vivado/工程打开是黑的_排查与正确用法.md`](docs/vivado/工程打开是黑的_排查与正确用法.md) | 工程模式 vs 非工程模式：为什么 GUI 里 Design Runs 是灰的 |
 | [`docs/vivado/vivado_50mhz_实测.md`](docs/vivado/vivado_50mhz_实测.md) | 早期「调试信号引到引脚」方案（顶层 `board_top_vivado`）的实测记录，对照用 |
 | [`syn/上板改造说明.md`](syn/上板改造说明.md) | 上板障碍清单 P0~P5、改造前后对照、6 个 RTL 缺陷的根因 |
-| [`docs/模块阅读文档.md`](docs/模块阅读文档.md) | **权威主文档**：逐模块 I/O、关键信号作用、上板改造三个必知机制、指令走查 |
+| [`docs/模块说明.md`](docs/模块说明.md) | **权威主文档**：逐模块 I/O、关键信号作用、上板改造三个必知机制、指令走查 |
 | [`docs/vivado/README.md`](docs/vivado/README.md) | 本目录（Vivado / ILA 文档）的索引与工程入口说明 |
 | [`docs/vivado/交付说明.md`](docs/vivado/交付说明.md) | 上板改造的交付清单与「本机没能做的部分」 |
 | [`docs/vivado/改动diff_接管前快照_vs_上板改造后.txt`](docs/vivado/改动diff_接管前快照_vs_上板改造后.txt) | 全部 RTL 改动的逐行对照 |
-| [`docs/产品说明_v9_客户版.md`](docs/产品说明_v9_客户版.md) | 面向使用者的产品说明（含 §7 P0 待办清单） |
+| [`docs/历史/产品说明_v9_客户版.md`](docs/历史/产品说明_v9_客户版.md) | 面向使用者的产品说明（含 §7 P0 待办清单） |
 | [`reports/mem_mdu_analysis.md`](reports/mem_mdu_analysis.md) | 访存子系统与 MDU 的专项分析 |
 
-> 文档有冲突时，以 [`docs/模块阅读文档.md`](docs/模块阅读文档.md) 为准。
+> 文档有冲突时，以 [`docs/模块说明.md`](docs/模块说明.md) 为准。
 
 ## 4.1 注释规范与迭代工具（2026-10 注释迭代）
 
@@ -407,7 +407,7 @@ wsl -d Ubuntu -e bash /mnt/e/FPGA/v9_vivado_ila/tools/wsl/run_canonical.sh mylab
 | 2 | ~~修 `CSR.mtval`（一行）~~ | ✅ **已完成（v9 B9）**：`rtl/CSR.sv` 补了 `assign mtval_out = mtval_reg;` |
 | 3 | ~~修 `ecall` 重定向~~ | ✅ **已完成（v9 B9）**：`rtl/IFU.sv` 去掉重定向分支的 `& ready`；同批还修了 `fault_inst_in` 接在未声明信号上的问题 |
 | 4 | ~~官方差分 H3 / H1 / H2~~ | ✅ **已完成并验证 39/39**（见 §4.2）：`rtl/EXU.sv` 新增 `up_stall` 接收门控、`rtl/DCache.sv` 读窗口整字 mask、工程顶层补 `rtl/MDU_pipelined.sv`。上游套件已克隆到 WSL `~/BigBird-CPU-Lab`，一行命令可复跑 |
-| 4b | **异常体系（D1 / C4）—— 现在优先级最高** | **先纠正一个说法**：不是"同步异常检测不工作"，而是 `Control` 的 `TRAP_ENABLE` **默认 0、且 `rtl/myCPU.sv` 例化时没把它引出来** ⇒ 每个 build 都是关的。在临时副本里强行打开后实测：`trap events = 5/4/4`（陷阱**确实触发**）但 **`mcause`/`mepc`/`mtval` 恒为 0**、程序恢复反而失败、基线回归掉到 6/7（`prog_loop` 复现 B4 症状）。⇒ 文档 D1 那句"判定与 CSR 登记已验证正确（实测 `mcause=2`、`mepc=0x20`）"**复现不出来**。修法见 [`docs/产品说明_v9_客户版.md`](docs/产品说明_v9_客户版.md) §7 P0-1（登记挪到 WB 级、复用已调通的 `ecall` 通道） |
+| 4b | **异常体系（D1 / C4）—— 现在优先级最高** | **先纠正一个说法**：不是"同步异常检测不工作"，而是 `Control` 的 `TRAP_ENABLE` **默认 0、且 `rtl/myCPU.sv` 例化时没把它引出来** ⇒ 每个 build 都是关的。在临时副本里强行打开后实测：`trap events = 5/4/4`（陷阱**确实触发**）但 **`mcause`/`mepc`/`mtval` 恒为 0**、程序恢复反而失败、基线回归掉到 6/7（`prog_loop` 复现 B4 症状）。⇒ 文档 D1 那句"判定与 CSR 登记已验证正确（实测 `mcause=2`、`mepc=0x20`）"**复现不出来**。修法见 [`docs/历史/产品说明_v9_客户版.md`](docs/历史/产品说明_v9_客户版.md) §7 P0-1（登记挪到 WB 级、复用已调通的 `ecall` 通道） |
 | 5 | **板上确认 B9 修复** | 重新烧录 + 抓 `probe15 == 0`（或 `probe1 == 0`）确认 `ecall` 后 PC 真的回到 `mtvec`。判据见 [`docs/vivado/上板验证判据.md`](docs/vivado/上板验证判据.md) §7.1 |
 | 6 | **时序收敛 / 提频** | 当前 Fmax ≈ 63MHz，100MHz 收敛不了（存在 >10ns 组合通路，瓶颈在布线） |
 | 7 | **上板外设** | LED / 4 位数码管 / UART 的引脚译码还没写（引脚表见 `docs/vivado/ila_使用说明.md` 第 1 节） |

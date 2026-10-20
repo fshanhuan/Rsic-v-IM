@@ -1,4 +1,4 @@
-# v9 CPU 优化评审报告（汇总）
+# CPU 优化评审 · 性价比与主流差距（v9 基线评审）
 
 > **对象**：BigBird v9 —— RV32IM 六级流水线 + I/D-Cache + gshare 分支预测器
 > **平台**：Xilinx xc7z020clg484-1（Zynq-7020），Vivado 2025.2，板级 50 MHz
@@ -9,7 +9,13 @@
 > ### ⚠ 本文是"评审"，不是"实施记录"
 > 本文写于 2026-10-16，当时**没有改任何 RTL**。之后按本文 §4 的建议动手做了 5 项，
 > 实施记录（含每项的 file:line 改动、实测前后对照、踩到的 6 个真 bug）在
-> **`docs/IMPLEMENTATION_v10.md`**。
+> **`docs/历史/IMPLEMENTATION_v10.md`**。
+>
+> ### ⚠ 证据路径已变（2026-10-20 整理）
+> 文中引用的 `project_src/*.rpt`（含 `:行号`）是 Vivado 的生成目录，**整理时已清理**，
+> 可用 `build_project_ila.tcl` 重建；**v17 现存的实现报告**见 `_bak/impl_reports/`
+> （`timing_post_route.boot.rpt` / `util_post_route.boot.rpt` / `timing_worst_paths.boot.rpt`）。
+> 本文的数字本身是当时实测的，仍可用；只有"去哪看原始 rpt"这一句失效。
 >
 > 一句话对照：整机 7 个程序周期 84/88/253/215/242/288/330 → **36/42/94/55/83/110/97**
 > （几何平均 **2.80×**），异常专项 `tb_exc` 从 0 项过变成 **20/20 全过**。
