@@ -1,0 +1,4 @@
+FreeRTOS-Kernel vendored from /home/shane/rv32/FreeRTOS-Kernel
+tag/branch: HEAD
+commit    : dbf70559b27d39c1fdb68dfb9a32140b6a6777a0
+date      : Mon Apr 22 07:38:21 2024 +0000

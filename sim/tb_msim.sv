@@ -185,7 +185,7 @@ module tb_msim #(
     // ---------------------------------------------------------------------
     wire [31:0] p_if_pc      = u_cpu.IFU_pc;
     wire [31:0] p_if_inst    = u_cpu.IFU_inst;
-    wire        p_if_deliver = u_cpu.IFU_Inst0.advance_en;   // IF 交付有效：= valid & ready & fetch_align，每指令 1 拍
+    wire        p_if_deliver = u_cpu.IFU_Inst0.advance_en;   // IF 交付有效：= 队头 valid & ready（v10 起前端 1 条/拍，不再是 3 拍）
     wire [31:0] p_id_pc      = u_cpu.IDU_pc;
     wire        p_id_valid   = u_cpu.IDU_valid;             // ID2 的 valid（= valid_d 直通）
     wire        p_id1_valid  = u_cpu.IDU_Inst0.valid;       // ID1 的 valid（第一级流水寄存）
@@ -537,7 +537,7 @@ module tb_msim #(
                     $display("  dram[0x1000] check  [FAIL]  exp=0x%h", exp_dram);
                 end
             end
-            $display("  ICache: hit=%0d miss=%0d", u_cpu.icache_hit_cnt, u_cpu.icache_miss_cnt);
+            $display("  ICache(bypassed): hit=%0d miss=%0d", u_cpu.debug_icache_hit_cnt, u_cpu.debug_icache_miss_cnt);
             $display("  DCache: hit=%0d miss=%0d", u_cpu.dcache_hit_cnt, u_cpu.dcache_miss_cnt);
             $display("  BPU   : pred=%0d hit=%0d miss=%0d", u_cpu.bp_pred_cnt, u_cpu.bp_hit_cnt, u_cpu.bp_miss_cnt);
 
@@ -611,7 +611,7 @@ module tb_msim #(
 
         // -----------------------------------------------------------------
         // 【重要】myCPU.sv:537 例化 WBU_inst0 时漏接了 `.stall`：
-        //   Verilator 会把未连接的 input 默认接 0（所以 cdp-tests 能过），
+        // - Verilator 会把未连接的 input 默认接 0（所以 cdp-tests 能过），
         //   iverilog 则让它保持 z → WBU 里 `if (!stall)` 变成 x → 寄存器
         //   永远不更新 → 一条写回都出不来（现象：rf 全是 x、debug_wb 恒 0）。
         //   iverilog -Wall 会直接报：
@@ -629,9 +629,11 @@ module tb_msim #(
         $dumpvars(0, tb_msim);
         // iverilog 不自动导出存储器数组：32 个通用寄存器逐个显式导出
 
-        // 复位：高电平有效，保持 8 拍后释放
+        // 复位：高电平有效，保持 8 拍后释放。
+        //   ★ negedge 释放：见 tb_iverilog.sv 同处注释（沿上释放是复位竞争）。
         rst = 1'b1;
         repeat (8) @(posedge clk);
+        @(negedge clk);
         rst = 1'b0;
         $display("[TB] reset released at cycle boundary, start running...");
     end

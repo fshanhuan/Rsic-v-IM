@@ -36,6 +36,9 @@ module Data_hazard(
 
     input        MEM_mem_ren,
     input        MEM_PIPE_mem_ren,   // MEM_PIPE 级是不是 load（load 在 MEM2 才前递）
+    /* ★ v15：M1（= MEM 级）的 load 数据**本拍可用**（DCache 第二读口命中）。
+     *   为 1 时 MEM 级可以当前递源、且不必停拍 —— 这正是把 load-use 从 2 拍压到 1 拍的地方。 */
+    input        MEM_m1_ok,
     input        EXU_R_Wen,
     input        EXU_mem_ren,        // EXU 级是不是 load（是的话 EX_result 是地址，不能当前递源）
     input        MEM_R_Wen,
@@ -66,8 +69,12 @@ logic wb_hit_rs1;
 assign exu_hit_rs1 = EXU_R_Wen && ~EXU_mem_ren && (EXU_rd == IDU_rs1) && (EXU_rd != 0);
 // MEM / MEM_PIPE 只认“非 load 且 valid”的指令：load 数据一律由 MEM2 级提供，
 //   这样即使 valid/控制位不同步也不会误命中。
-assign mem_hit_rs1 = MEM_R_Wen && MEM_valid && ~MEM_mem_ren && (MEM_rd == IDU_rs1) && (MEM_rd != 0);
-assign pipe_hit_rs1 = MEM_PIPE_R_Wen && MEM_PIPE_valid && ~MEM_PIPE_mem_ren && (MEM_PIPE_rd == IDU_rs1) && (MEM_PIPE_rd != 0);
+assign mem_hit_rs1 = MEM_R_Wen && MEM_valid && (~MEM_mem_ren || MEM_m1_ok)
+                   && (MEM_rd == IDU_rs1) && (MEM_rd != 0);
+// ★ v11（S6）：M2（MEM_PIPE）**也能前递 load 数据**了 —— LSU 在 M2 用当拍的 rdata
+//   （DCache 命中同拍组合）按 _pipe 的偏移/位宽重新扩展，见 LSU.sv 的 "M2 级扩展" 块。
+//   所以"load 数据只由 MEM2 提供"这条收窄成"MEM2 兜底"：正常情况下 M2 就给出真值。
+assign pipe_hit_rs1 = MEM_PIPE_R_Wen && MEM_PIPE_valid && (MEM_PIPE_rd == IDU_rs1) && (MEM_PIPE_rd != 0);
 assign mem2_hit_rs1 = MEM2_R_Wen && MEM2_valid && (MEM2_rd == IDU_rs1) && (MEM2_rd != 0);
 // v9 修复（C5）：WB 前递补上 WB_valid，与其他四个源口径一致。原因：WBU 送出的
 //   WB_R_Wen 是**未被 valid 门控**的寄存值（WBU 里 R_wen_next = R_wen_reg & valid_reg，
@@ -91,8 +98,9 @@ logic mem2_hit_rs2;
 logic wb_hit_rs2;
 assign exu_hit_rs2 = EXU_R_Wen && ~EXU_mem_ren && (EXU_rd == IDU_rs2) && (EXU_rd != 0);
 // 与 rs1 同口径（见上方说明），rs2 用同样的优先级编码，保证双源规则一致。
-assign mem_hit_rs2 = MEM_R_Wen && MEM_valid && ~MEM_mem_ren && (MEM_rd == IDU_rs2) && (MEM_rd != 0);
-assign pipe_hit_rs2 = MEM_PIPE_R_Wen && MEM_PIPE_valid && ~MEM_PIPE_mem_ren && (MEM_PIPE_rd == IDU_rs2) && (MEM_PIPE_rd != 0);
+assign mem_hit_rs2 = MEM_R_Wen && MEM_valid && (~MEM_mem_ren || MEM_m1_ok)
+                   && (MEM_rd == IDU_rs2) && (MEM_rd != 0);
+assign pipe_hit_rs2 = MEM_PIPE_R_Wen && MEM_PIPE_valid && (MEM_PIPE_rd == IDU_rs2) && (MEM_PIPE_rd != 0);
 assign mem2_hit_rs2 = MEM2_R_Wen && MEM2_valid && (MEM2_rd == IDU_rs2) && (MEM2_rd != 0);
 assign wb_hit_rs2  = WB_R_Wen  && WB_valid && (WB_rd  == IDU_rs2) && (WB_rd  != 0);
 assign IDU_rs2_choice = exu_hit_rs2 ? 3'b001 :
@@ -115,11 +123,16 @@ assign IDU_rs2_choice = exu_hit_rs2 ? 3'b001 :
  * ------------------------------------------------------------------------- */
 assign exu_load_use  = EXU_mem_ren
                      && (((EXU_rd == IDU_rs1) || (EXU_rd == IDU_rs2)) && (EXU_rd != 0));
-assign mem_load_use  = MEM_mem_ren && MEM_valid
+// ★ v15：MEM 级的 load 若被 M1 探测口命中（MEM_m1_ok=1），数据当拍就可用 ⇒ **不停**。
+//   不命中 / MMIO / store 才停 —— 这正是把 load-use 从 2 拍压到 1 拍的那一项。
+assign mem_load_use  = MEM_mem_ren && MEM_valid && ~MEM_m1_ok
                      && (((MEM_rd == IDU_rs1) || (MEM_rd == IDU_rs2)) && (MEM_rd != 0));
 assign pipe_load_use = MEM_PIPE_mem_ren && MEM_PIPE_valid
                      && (((MEM_PIPE_rd == IDU_rs1) || (MEM_PIPE_rd == IDU_rs2)) && (MEM_PIPE_rd != 0));
-// MEM2（LSU 第三级）的 load 数据已经在 forward_val_wb 里，由 3'b011 直接前递。
-assign load_use_stall = exu_load_use | mem_load_use | pipe_load_use;   // 三级任一命中即停
+// MEM2（LSU 第三级）的 load 数据已经在 forward_val_wb 里，由 3'b011 直接前递（现在是兜底）。
+// ★ v11（S6）：`pipe_load_use` 不再参与停顿 —— M2 已经能给出 load 真值（见上面 pipe_hit 的
+//   说明），消费者在"load 位于 M2"那一拍就能被放出去，比原来少停 1 拍。
+//   它仍然算出来，只做波形观察用（正常情况下应为 0；不为 0 说明 M2 前递路径断了）。
+assign load_use_stall = exu_load_use | mem_load_use;
 
 endmodule                                                           //Arbiter

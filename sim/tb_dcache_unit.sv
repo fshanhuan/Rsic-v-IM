@@ -33,6 +33,14 @@ module tb_dcache_unit;
     logic [ 1:0] cpu_mask;
     logic [31:0] cpu_rdata, mem_addr, mem_wdata;
     logic        mem_en, mem_wen, hit, miss, hold;
+    // ★ v14（P4）：请求身份证。单元测试里每拉起一次 cpu_en 就算一条新请求，
+    //   所以按 cpu_en 的上升沿翻转即可（整机里由 LSU 的推进条件驱动）。
+    logic        req_seq, cpu_en_q;
+    always @(posedge clk) begin
+        cpu_en_q <= cpu_en;
+        if (cpu_en & ~cpu_en_q) req_seq <= ~req_seq;
+    end
+    initial req_seq = 1'b0;
     logic [ 1:0] mem_mask;
     logic [31:0] hit_cnt, miss_cnt;
 
@@ -40,6 +48,9 @@ module tb_dcache_unit;
         .clk(clk), .reset(reset),
         .cpu_en(cpu_en), .cpu_wen(cpu_wen),
         .cpu_addr(cpu_addr), .cpu_wdata(cpu_wdata), .cpu_mask(cpu_mask),
+        // 单元测试里没有「流水线推进」概念：一次访问都是单拍激励，所以推进恒为 1
+        //   （整机里必须接 myCPU 的 lsu_adv，见 DCache 端口注释）。
+        .cpu_adv(1'b1), .req_seq(req_seq),
         .mem_rdata(mem_rdata), .cpu_rdata(cpu_rdata), .mem_addr(mem_addr),
         .mem_en(mem_en), .mem_wen(mem_wen), .mem_wdata(mem_wdata),
         .mem_mask(mem_mask), .hit(hit), .miss(miss), .hold(hold),

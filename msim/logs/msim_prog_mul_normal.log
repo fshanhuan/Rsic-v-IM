@@ -3,7 +3,7 @@
 # 10.5
 
 # vsim -c -quiet -suppress 7061 -L work work.tb_msim "+prog=sim/prog_mul.hex" "+prog_id=1" "+max=600" -do "run -all; quit -f" 
-# Start time: 21:54:41 on Oct 10,2026
+# Start time: 01:09:26 on Oct 18,2026
 # ** Note: (vsim-8009) Loading existing optimized design _opt
 # //  ModelSim SE-64 10.5 Feb 13 2016 
 # //
@@ -27,31 +27,32 @@
 # ==============================================================
 # [TB] workaround: force u_cpu.WBU_inst0.stall = 1'b0  (myCPU.sv:537 leaves .stall open)
 # [TB] reset released at cycle boundary, start running...
-# [WB ] cyc=14 pc=00000000 inst=00500113 addi ena=1 reg=x2 val=00000005
-# [WB ] cyc=19 pc=00000004 inst=00700193 addi ena=1 reg=x3 val=00000007
-# [WB ] cyc=28 pc=00000008 inst=023102b3 mul ena=1 reg=x5 val=00000023
-# [WB ] cyc=33 pc=0000000c inst=02310433 mul ena=1 reg=x8 val=00000023
-# [WB ] cyc=38 pc=00000010 inst=023104b3 mul ena=1 reg=x9 val=00000023
-# [WB ] cyc=43 pc=00000014 inst=02310533 mul ena=1 reg=x10 val=00000023
-# [WB ] cyc=48 pc=00000018 inst=023105b3 mul ena=1 reg=x11 val=00000023
-# [WB ] cyc=53 pc=0000001c inst=02310633 mul ena=1 reg=x12 val=00000023
-# [WB ] cyc=58 pc=00000020 inst=023106b3 mul ena=1 reg=x13 val=00000023
-# [WB ] cyc=63 pc=00000024 inst=02310733 mul ena=1 reg=x14 val=00000023
-# [WB ] cyc=66 pc=00000028 inst=00000013 addi ena=1 reg=x0 val=00000000
-# [WB ] cyc=70 pc=0000002c inst=00000013 addi ena=1 reg=x0 val=00000000
-# [WB ] cyc=75 pc=00000030 inst=00000013 addi ena=1 reg=x0 val=00000000
-# [RDR] cyc=79 dnpc=00000000 mispredict=0 ecall=1 mret=0 intr=0
-# [END] ecall reached ID at cyc=79 id_pc=00000038 (snapshot after DRAIN=8 cycles)
-# [WB ] cyc=80 pc=00000034 inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=11 pc=00000000 inst=00500113 addi ena=1 reg=x2 val=00000005
+# [WB ] cyc=14 pc=00000004 inst=00700193 addi ena=1 reg=x3 val=00000007
+# [WB ] cyc=17 pc=00000008 inst=023102b3 mul ena=1 reg=x5 val=00000023
+# [WB ] cyc=20 pc=0000000c inst=02310433 mul ena=1 reg=x8 val=00000023
+# [WB ] cyc=23 pc=00000010 inst=023104b3 mul ena=1 reg=x9 val=00000023
+# [WB ] cyc=26 pc=00000014 inst=02310533 mul ena=1 reg=x10 val=00000023
+# [WB ] cyc=29 pc=00000018 inst=023105b3 mul ena=1 reg=x11 val=00000023
+# [WB ] cyc=32 pc=0000001c inst=02310633 mul ena=1 reg=x12 val=00000023
+# [WB ] cyc=33 pc=00000020 inst=023106b3 mul ena=1 reg=x13 val=00000023
+# [WB ] cyc=34 pc=00000024 inst=02310733 mul ena=1 reg=x14 val=00000023
+# [RDR] cyc=34 dnpc=00000000 mispredict=0 ecall=1 mret=0 intr=0
+# [END] ecall reached ID at cyc=34 id_pc=00000038 (snapshot after DRAIN=8 cycles)
+# [WB ] cyc=35 pc=00000028 inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=36 pc=0000002c inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=37 pc=00000030 inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=38 pc=00000034 inst=00000013 addi ena=1 reg=x0 val=00000000
+# [WB ] cyc=39 pc=00000038 inst=00000073 ecall ena=1 reg=x0 val=00000000
 # 
 # ==================== WRITEBACK EVENT SUMMARY ====================
-#   wb events (dedup)   = 14
+#   wb events (dedup)   = 15
 #   wb repeats removed  = 14  (same event held over stall cycles)
 #   store accesses      = 0
 #   load  accesses      = 0
-#   IFU_stall cycles    = 45
+#   IFU_stall cycles    = 16
 #   redirects (dnpc)    = 1
-#   ecall decoded at cyc= 79  (stop after DRAIN=8)
+#   ecall decoded at cyc= 34  (stop after DRAIN=8)
 # 
 # ==================== GPR SNAPSHOT x0..x31 ====================
 #   (hier path: u_cpu.IDU_Inst0.Reg_Stack_inst0.Reg_inst.rf[])
@@ -94,7 +95,7 @@
 #   mstatus  = 0x00001800
 #   mtvec    = 0x00000000
 #   dram[0x1000] = 0x00000000
-#   ICache: hit=50 miss=17
+#   ICache(bypassed): hit=0 miss=0
 #   DCache: hit=0 miss=0
 #   BPU   : pred=0 hit=0 miss=0
 # 
@@ -103,10 +104,10 @@
 #   fetch-align (pc<->inst coherent)  [PASS]
 # 
 # ==================== RESULT ====================
-#   total cycles = 86
+#   total cycles = 41
 # [SELFCHECK] status=PASS  (34/34 checks passed)
 # ===============================================
 # ** Note: $finish    : sim/tb_msim.sv(577)
-#    Time: 930 ns  Iteration: 1  Instance: /tb_msim
-# End time: 21:54:42 on Oct 10,2026, Elapsed time: 0:00:01
+#    Time: 490 ns  Iteration: 1  Instance: /tb_msim
+# End time: 01:09:28 on Oct 18,2026, Elapsed time: 0:00:02
 # Errors: 0, Warnings: 0

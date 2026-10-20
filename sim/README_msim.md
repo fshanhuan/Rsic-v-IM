@@ -55,6 +55,8 @@ plusarg 由 vsim 命令行透传，不再覆盖默认值。
 
 ## 3. 实测结果（本机 ModelSim SE-64 10.5，2016.02）
 
+### 3.1 v9 的 15 项（至今仍全过）
+
 ```
 === [2/3] 7 programs x {normal, strict} + dcache unit ===
   [OK  ] prog             normal: PASS 35/35   strict: PASS 35/35
@@ -65,14 +67,45 @@ plusarg 由 vsim 命令行透传，不再覆盖默认值。
   [OK  ] prog_loop        normal: PASS 34/34   strict: PASS 34/34
   [OK  ] prog_div_pair    normal: PASS 34/34   strict: PASS 34/34
   [OK  ] tb_dcache_unit   PASS
+```
+
+### 3.2 v10.3 扩到 23 项 —— 加入 `tb_sys` ×5 + `tb_exc` ×3
+
+v10 新增的两个测试台（`sim/tb_sys.sv`、`sim/tb_exc.sv`）**没有 `$dumpvars`**，
+所以不需要像 `tb_iverilog.sv` 那样先过 `mk_msim_tb.py` 生成一份 ModelSim 专用副本，
+直接 `vlog -sv` 就能编。`run_msim.ps1` 的 `[2b/3]` 段就是干这个的：
+
+```
+=== [2b/3] v10 system tests: tb_sys x5 + tb_exc x3 ===
+  [OK  ] tb_sys     csr          PASS 16 checks
+  [OK  ] tb_sys     intr         PASS 9 checks
+  [OK  ] tb_sys     fencei       PASS 5 checks
+  [OK  ] tb_sys     ebreak       PASS 9 checks
+  [OK  ] tb_sys     zicsr        PASS 23 checks
+  [OK  ] tb_exc     illegal      PASS 7 checks
+  [OK  ] tb_exc     misalign     PASS 8 checks
+  [OK  ] tb_exc     jal_misalign PASS 5 checks
 
 === [3/3] SUMMARY ===
-  checks run : 15
+  checks run : 23
   failures   : 0
   RESULT     : ALL PASS
 ```
 
-## 4. 五个踩过的坑（都已在脚本里解决）
+**三个仿真器的周期数对照**（`tb_sys` 的 5 个用例）：
+
+| 用例 | iverilog | Verilator | ModelSim |
+|---|---|---|---|
+| csr / intr / fencei / ebreak / zicsr | 39 / 82 / 46 / 39 / 183 | 39 / 82 / 46 / 39 / 183 | **39 / 82 / 46 / 39 / 183** |
+
+7 个整机程序在 ModelSim 下是 35/41/93/54/82/109/96，**比另外两个各少 1 拍** ——
+因为 `tb_msim.sv` 是 v9 从 `tb_iverilog.sv` 生成的副本，里面还是
+`@(negedge clk); rst = 1'b0;`（没有 v10.2 加的那拍 `#1` 保护，见
+`docs/验证报告_v10_Verilator交叉仿真.md` §9.1）。**功能检查项一个不少**。
+重新生成一次（`python sim/mk_msim_tb.py`）可以消掉这 1 拍，但会把 v10 之后
+`tb_iverilog.sv` 的改动一起带进来，属于改验证设施，目前没动。
+
+## 4. 踩过的坑（都已在脚本里解决）
 
 ### 4.1 RTL 编译：`include "rtl/para.sv"` 找不到
 

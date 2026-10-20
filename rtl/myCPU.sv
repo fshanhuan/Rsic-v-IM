@@ -61,15 +61,44 @@ module myCPU (
     //   吃掉"（dnpc_flag 只有一拍宽，被吃掉不会重发）。踩坑史见 §MYCPU-3
     (* mark_debug = "true", keep = "true" *) output  logic        debug_dnpc_flag, // ← dnpc_flag：重定向的"请求"（1 bit）
     (* mark_debug = "true", keep = "true" *) output  logic        debug_ready,     // ← IDU_ready = EXU_ready & ~IFU_stall：下游"背压"，与 IFU 的 .ready 是同一个网
-    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_ifu_pc     // ← IFU_pc：重定向的"结果"（取指级 PC 本体，比 debug_wb_pc 早 3~4 拍）
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_ifu_pc,    // ← IFU_pc：重定向的"结果"（取指级 PC 本体，比 debug_wb_pc 早 3~4 拍）
+
+    // ★ v12（B）新增：把"停在哪"做成一根 32 位状态字 + 一根拍计数器。
+    //   为什么挤成一根而不是各加一个探针：ILA 的 16 个探针宽度是**冻结的**
+    //   （build_project_boot.tcl 的 ILA_PROBES），改宽度要重建 IP、还得同步所有分析脚本。
+    //   把 8 个 1 位量打进一根 32 位字，探针表一个字节都不用动。
+    //   位分配（bit0 起）：
+    //     0 IFU_stall        前端冻结（load-use 冒险 / dcache_hold）—— 停顿时长的总分母
+    //     1 dcache_hold      LSU 冻结：DCache load 缺失（同步 BRAM 的 1 拍回不来）
+    //     2 mdu_busy         MDU 多拍迭代未完成（乘/除的 17 拍忙碌）
+    //     3 system_redirect  mret / ecall / fence.i / trap 引起的重定向（不含分支预测失败）
+    //     4 trap_seen        **粘滞**：复位后发生过至少一次同步异常/断点。抓"第一次出事"
+    //                        靠它 —— trap_take 只有一拍，抓包很难恰好停在那一拍。
+    //     5 dnpc_flag        任意重定向请求（与 probe13 同源，方便单看一根字）
+    //     6 load_use_stall   Control 判定的 load-use 冒险（IFU_stall 的子集）
+    //     7 IDU_ready        下游背压（与 probe14 同源）
+    //   8~10 由 board_top 填：boot_busy / boot_ok / boot_err（见 board/board_top.sv）
+    //   ★ 不变量：这根字的低 8 位**只由本模块驱动**，board_top 只能置 8~10 位，
+    //     别在板级层再改写低位（两处都驱动同一个 bit 会综合出多驱动）。
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_status,
+    // ★ v12（B）：mcycle 的低 32 位。板上量"一条指令几拍"**唯一**的可信来源：
+    //   ILA 每一拍都带这个数，任意两个采样点之间做差就是精确拍数，不用改被测程序。
+    //   （mtime(0x7C0) 是 500kHz 墙钟，量不出拍数 —— 这正是补 Zicntr 的原因。）
+    (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_mcycle
 
 );
 
   // ===== 流水级内部连线：命名 <级名>_<信号>；IFU*（取指 → IDU）= 指令字 / PC / PC+4 / 有效位 =====
   logic [31:0] IFU_inst;
   logic        IFU_valid;
-  logic [31:0] IFU_pc;
+  logic [31:0] IFU_pc;             // ★ v10 起 = **队头**指令的 PC（不再等于取指侧 PC）
   logic [31:0] IFU_snpc;
+  // v10：取指队列把 pc / pred_* 与指令绑成一条，交付侧一律从队头取；
+  //   fetch_pc 是取指侧 PC（预测器查询用），两者语义不同，别混用。
+  logic [31:0] IFU_fetch_pc;
+  logic        IFU_pred_taken;
+  logic [31:0] IFU_pred_target;
+  logic [`BP_INDEX_BITS-1:0] IFU_pred_index;
 
   /************************* IDU ********************/   // 译码 → EXU：控制位 + 操作数/立即数 + CSR/系统标志
   logic [31:0] IDU_pc;
@@ -104,6 +133,8 @@ module myCPU (
   logic [31:0] IDU_branch_pc;
   logic        IDU_valid;             // → EXU.valid_last：本拍译码级确实有一条有效指令
   logic        IDU_ready;             // ← EXU_ready & ~IFU_stall（即 IDU.ready_last）；它同时就是 IFU 的 ready 输入
+  // ★ v13.2（P0）：Control → IDU 的"系统指令提交许可"（见 Control.sv 里 sys_commit_ok 的注释）
+  logic        sys_commit_ok_ctrl;
   logic        IDU_fence_i_flag;
   /************************* EXU ********************/   // 执行 → LSU：ALU 结果 + 分支/跳转结论 + 访存控制位
   logic [31:0] EXU_branch_pc;
@@ -111,6 +142,7 @@ module myCPU (
   logic [ 2:0] EXU_funct3;
   logic [31:0] EXU_rs2_value;
   logic [ 4:0] EXU_rd;
+  logic [31:0] EXU_inst_reg;          // v11（S4）：EX 级寄存的指令原码（EXU.fault_inst_reg 引出）
   logic [31:0] EXU_rd_value;
   logic [15:0] EXU_csr_wen;
   logic        EXU_R_wen;
@@ -148,6 +180,10 @@ module myCPU (
   logic [ 4:0] WBU_rd;
   logic        WBU_R_wen;
   logic [15:0] WBU_csr_wen;
+  // v10.2：CSR 读口 RAW 前递（IDU 发"读哪个"，Control 从 4 深影子链 + EX 级挑最新在途写值）
+  logic [15:0] IDU_csr_sel;           // IDU → Control：本拍所读 CSR 的独热码
+  logic [31:0] csr_rd_fwd_val;        // Control → IDU：前递后的 CSR 读值
+  logic        csr_rd_fwd_en;         // Control → IDU：前递命中（否则用寄存器本体）
   logic        WBU_ready;
   logic        WBU_valid;
   logic        LSU_valid;             // 名字是 LSU_ 但声明在 WBU 分组：MEM2/WB 级的有效位（给 Control）
@@ -163,17 +199,28 @@ module myCPU (
   logic IFU_mem_stall;    // 只含存储侧 hold（参与 IFU.valid）
   logic IFU_stall_ctrl;   // 来自 Control：load-use 冒险等前端暂停请求
   logic load_use_stall;   // 来自 Control：只含 load-use 冒险（供 EXU_inst_clear 使用；引出便于波形观察）
-  logic icache_clr;
+  // v11（S1）：icache_clr 已删除 —— ICache 被旁路后指令存储器不可变，fence.i 是合法空操作。
+  //   Control 仍产出 icache_clr（端口保留），但 myCPU 不再连它；接回真 cache 时把它接回去即可。
   // ★ 不变量：存储侧的 hold 必须**先于使用处**声明（否则 Verilog 先按隐式 1 位 wire 建网，
   //   再报重复声明；ModelSim 直接 vlog-2730 硬报错）。踩坑史见 §MYCPU-5
-  logic icache_hold;
+  //   v10：icache_hold 随"I-Cache 全流水化"整体删除（取指不再有 hold 停拍）。
   logic dcache_hold;
+  // v12（B）：系统重定向观察（Control 的 system_redirect 直通，进 debug_status bit3）
+  logic system_redirect;
+  // v12（B）：Zicntr 观察口与退休脉冲
+  logic [31:0] IDU_mcycle_dbg;   // ← IDU（CSR mcycle 低 32 位），进 debug_mcycle
+  logic        LSU_retire_wb;    // ← LSU：本拍有一条指令推进到 WB（minstret 的计数使能）
 
-  // ★ 不变量：IFU_stall / IFU_mem_stall 的三个来源必须同源，且**只**并入存储侧 hold，
-  //   绝不并入 EXU_inst_clear —— 只有存储侧 hold 参与 IFU.valid 灌泡（load-use 只冻结 PC，
-  //   否则与 IDU 采样点错拍）；缓存停拍期间 EX 级那条指令要**重放**，清掉就丢了。
-  assign IFU_stall     = IFU_stall_ctrl | icache_hold | dcache_hold;
-  assign IFU_mem_stall = icache_hold | dcache_hold;
+  // ★ 不变量：IFU_stall / IFU_mem_stall 的来源必须同源，且**只**并入存储侧 hold，
+  //   绝不并入 EXU_inst_clear —— 只有存储侧 hold 参与灌泡/重放语义（load-use 只冻结接收）。
+  //   v10：I-Cache 改成**全流水、未命中零停顿**之后，**icache_hold 这根线已经不存在** ——
+  //   取指不再有 hold，IFU_stall 里也就没有它。留下的 dcache_hold 仍然必须并入：
+  //   load 未命中期间 EX 级那条指令的操作数要**重放**（由 Control 的 mem_stall 项负责），
+  //   同时 IDU 要冻结（由这里的 IFU_stall 负责）。
+  //   ★ 不变量：IFU_stall 仍然只当"冻结接收"用，不要拿去门控 IFU 内部的 PC 生成 ——
+  //   前端解耦的全部意义就是"后端停了，取指照跑"（见 IFU.sv 文件头）。
+  assign IFU_stall     = IFU_stall_ctrl | dcache_hold;
+  assign IFU_mem_stall = dcache_hold;
 
   /* ---------- v9 新增：分支预测器观测与连线 ---------- */
   // 预测信息跟着指令向前流：bp_* 是 IF 级查询结果，IDU_pred_*/EXU_pred_* 是 ID/EX 级打拍副本。
@@ -213,21 +260,22 @@ module myCPU (
   logic        EXU_iaddr_misalign_exc;
   logic [31:0] EXU_fault_inst;        // 出错指令编码（写 mtval 用）
   logic        trap_take;             // 确认接收一次同步异常（单拍）
-  logic        trap_take_q;           // 下一拍补发重定向
   logic [3:0]  trap_cause;            // `EXC_* 独热码
   logic [31:0] fault_addr, fault_inst;   // mtval 取值来源：地址用 EXU 的有效地址/跳转目标，编码用 EXU_fault_inst
+  logic [31:0] fault_pc;              // mepc 取值来源：**EX 级**出错指令的 PC（v10 新增 C9）
   logic        exc_pending;           // Control：EX 级确有一条指令在等异常处理（= exc_any & EXU_valid）
   logic [31:0] IDU_mtval_out;         // 供顶层 debug 端口观察
   logic [31:0] IDU_mcause_out;        // 异常/中断原因码观察
 
-  /* ---------- v9 新增：I-Cache / D-Cache 观测信号（可在波形中查看命中率） ---------- */
-  logic [31:0] icache_rdata;          // ICache 返回给 IFU 的指令数据（= IFU.irom_data）
-  logic        icache_hit;
-  logic        icache_miss;
-  logic        icache_fetch_align;    // ICache.fetch_align：本拍 irom_data 确实属于当前 PC；IFU 用它算 valid
-  logic        icache_mem_en;         // ICache → IROM 的读使能，顶层直连 irom_en
-  logic [31:0] icache_hit_cnt;
-  logic [31:0] icache_miss_cnt;
+  /* ---------- v11（S1）：取指侧观测信号（ICache 已旁路，见下方例化处） ---------- */
+  logic [31:0] icache_rdata;          // 返回给 IFU 的指令数据（= IFU.irom_data）
+  // v10：原 icache_fetch_align / icache_hold 被删（I-Cache 全流水、未命中旁路）。
+  // v11：icache_hit / icache_miss / hit_cnt / miss_cnt 一并删除 —— 旁路后它们恒为 0，
+  //   留着只会让"命中率"这个数字继续误导人（见 debug_icache_* 的注释）。
+  logic        icache_resp_valid;     // 本拍 icache_rdata 有效（= cpu_req 的 1 拍延迟）
+  logic [31:0] icache_addr;           // IFU → 取指地址（组合直通 BRAM）
+  logic        icache_req;            // IFU → 取指请求（= IROM 的读使能门控）
+  logic        icache_mem_en;         // → IROM 的读使能，顶层直连 irom_en
 
   logic [31:0] lsu_bus_addr;          // LSU 发出的字节地址（= DCache.cpu_addr）
   logic        lsu_bus_wen;           // 写有效（= DCache.cpu_wen；也参与 cpu_en）
@@ -240,24 +288,31 @@ module myCPU (
   logic [31:0] dcache_hit_cnt;
   logic [31:0] dcache_miss_cnt;
 
-  // ==== ICache_inst —— 取指级（IFU ↔ IROM 之间）：组合查表 + 一拍同步回填，没有 valid/ready 对，
-  //   背压反过来 —— 由 ICache 用 hold 停 IFU（hold 汇入 IFU_stall 冻结 PC）。
-  //   ★ 容易漏接：`hold`/`fetch_align` 漏接则未命中时前端照跑、IFU 交付早一拍的废数据（无报错）。
-  ICache ICache_inst (
-      .clk        (cpu_clk),
-      .reset      (cpu_rst),
-      .cpu_addr   (IFU_pc),
-      .mem_rdata  (irom_data),
-      .cpu_rdata  (icache_rdata),
-      .mem_addr   (irom_addr),
-      .mem_en     (icache_mem_en),
-      .fetch_align(icache_fetch_align),
-      .hit        (icache_hit),
-      .miss       (icache_miss),
-      .hold       (icache_hold),
-      .hit_cnt    (icache_hit_cnt),
-      .miss_cnt   (icache_miss_cnt)
-  );
+  // ==== v11（S1）：取指级 = 组合直通 BRAM + 1 拍响应，**没有指令缓存** ====
+  //   为什么删 ICache（证据链，见 docs/优化_v11_进度.md）：
+  //     ① 响应侧 `cpu_rdata = hit ? data[idx_r] : mem_rdata`：hit 成立意味着 data[idx_r]
+  //        就是同一地址上一次从 IROM 读回的那个字，而 IROM 是只读的（board_top.sv 里
+  //        READ_ONLY(1)）→ 两者**逐位恒等**，这个 mux 是恒等 mux。
+  //     ② 请求侧 `mem_en = cpu_req` 与 hit 无关 → 命中并不省一次 IROM 读（连功耗都不省）。
+  //     ③ hit/miss 的唯一读者是下面 4 个 debug 计数器；IFU 只吃 resp_valid。
+  //   ⇒ 在"BRAM 直连、固定 1 拍延迟"的结构下，ICache 对周期数/功耗的贡献精确为 0，
+  //     只留下一个 fence.i 一致性责任。v10 把 IFU 改成全流水 + 指令队列后，
+  //     "取指与访存解耦"这件事已经由队列完成，cache 的历史使命已经结束。
+  //   ★ rtl/ICache.sv **原样保留**，作为"以后把取指搬到 DDR/AXI 时的参考实现"
+  //     （那时延迟可变，1 字/行、64 行、直接映射都得重做，所以留着并不省事，只是留个起点）。
+  //   ★ 若改回真 cache：恢复 ICache 例化、把 irom_en 接到它的 mem_en、把 icache_clr 接回去；
+  //     resp_valid 仍是 cpu_req 的 1 拍延迟（接口口径不变，其余代码无需改）。
+  logic        icache_req_r;          // cpu_req 的 1 拍延迟 = resp_valid（与同步 BRAM 同拍对齐）
+  always_ff @(posedge cpu_clk) begin
+      if (cpu_rst) icache_req_r <= 1'b0;
+      else         icache_req_r <= icache_req;
+  end
+
+  assign icache_resp_valid = icache_req_r;               // 本拍 icache_rdata 有效
+  assign irom_addr         = icache_addr;                // 地址组合直通 BRAM
+  assign icache_mem_en     = icache_req;                 // IROM 读使能门控（空转拍不读）
+  // ★ 不变量：resp_valid=0 时必须给 `NOP，绝不把 sync_mem 在 ren=0 时保持的旧 rdata 当指令。
+  assign icache_rdata      = icache_req_r ? irom_data : `NOP;
 
   // ==== debug 观察口赋值：只做"内部网 → 顶层端口"直连，不插逻辑（加寄存器/与门会失真）====
   // (1) 写回级提交值：直连 WBU 输出，所以看到的就是真实写回口径。
@@ -268,8 +323,11 @@ assign debug_wb_reg = WBU_rd;
 assign debug_wb_value = WBU_rd_value;
 
 // (2) 缓存计数器（B8：原来是 board_top 的层次化引用，综合不认，见 §MYCPU-1）
-assign debug_icache_hit_cnt  = icache_hit_cnt;
-assign debug_icache_miss_cnt = icache_miss_cnt;
+//   ★ v11（S1）：ICache 旁路后，"指令命中/缺失"已不存在 → 这两个端口恒 0。
+//     保留端口是为了不动 board_top / xdc / ILA 的引脚与探针表（改端口会牵动 4 处）。
+//     数据侧（DCache）仍是真 cache，它的两个计数器照常工作。
+assign debug_icache_hit_cnt  = 32'b0;
+assign debug_icache_miss_cnt = 32'b0;
 assign debug_dcache_hit_cnt  = dcache_hit_cnt;
 assign debug_dcache_miss_cnt = dcache_miss_cnt;
 
@@ -288,26 +346,55 @@ assign debug_dnpc_flag = dnpc_flag;
 assign debug_ready     = IDU_ready;
 assign debug_ifu_pc    = IFU_pc;
 
+// (5) v12（B）：停顿时长 / 重定向来源的状态字 + 拍计数器。
+//   ★ 不变量：低 8 位只在这里拼，board_top 只往 bit8~10 填引导状态。
+//   ★ trap_seen 是**粘滞**位（复位前一直为 1），不随 trap_take 回落：
+//     trap_take 只有一拍宽，让它挂在探针上等于"赌抓包恰好停在那拍"。
+logic trap_seen;
+always_ff @(posedge cpu_clk) begin
+    if (cpu_rst)      trap_seen <= 1'b0;
+    else if (trap_take) trap_seen <= 1'b1;
+end
 
-  // ==== IFU_Inst0 —— 取指级（IF 级）：valid（→ IDU）与 ready（← IDU_ready）标准握手；
-  //   stall 只冻结 PC，mem_stall 额外把 valid 打成 0 灌泡（两者分工不同，不能合并）；
-  //   PC 优先级：reset > dnpc 真实重定向 > 预测跳转 > stall 保持 > 顺序 +4。
-  //   ★ 不变量（B4/B7/B9）：真实重定向 dnpc_flag **既不看 inst_valid、也不看 ready**，
-  //     别把任何门控加回来；原因与逐拍证据见 §MYCPU-3
+assign debug_status = {24'b0,
+                       IDU_ready,          // bit7
+                       load_use_stall,     // bit6
+                       dnpc_flag,          // bit5
+                       trap_seen,          // bit4
+                       system_redirect,    // bit3
+                       EXU_mdu_busy,       // bit2
+                       dcache_hold,        // bit1
+                       IFU_stall};         // bit0
+//   mcycle 低 32 位：从 CSR 经 Reg_Stack/IDU 直通上来，纯观察
+assign debug_mcycle = IDU_mcycle_dbg;
+
+
+  // ==== IFU_Inst0 —— 取指级（IF 级）：**PC 生成器 + 4 项取指队列**（v10 解耦点）。
+  //   生产者侧 ic_addr/ic_req 每拍向 ICache 发一次请求，不看下游 ready/stall；
+  //   消费者侧 valid/ready 标准握手，队头出队才更新 id 侧看到的 pc/inst/pred_*。
+  //   ★ 不变量（B4/B7/B9 + v10）：真实重定向 dnpc_flag **既不看 inst_valid、也不看 ready、
+  //     也不看队列深度**，别把任何门控加回来；它同时清空队列与在途请求。
+  //   ★ 不变量：predictor 的 fetch_pc 必须接 IFU 的 **fetch_pc**（取指侧 PC），不能接
+  //     IFU_pc（队头 PC）—— 后者是两条指令之前发出的地址，查出来的预测是别人的。
   IFU IFU_Inst0 (
       .clock    (cpu_clk),
       .reset    (cpu_rst),
       .dnpc     (dnpc),
       .dnpc_flag(dnpc_flag),
-      .stall     (IFU_stall),
-      .mem_stall (IFU_mem_stall),
-      .inst_valid(icache_fetch_align),
+      .inst_valid(icache_resp_valid),
       .pred_taken (bp_pred_taken),
       .pred_target(bp_pred_target),
+      .pred_index (bp_pred_index),
+      .ic_addr  (icache_addr),
+      .ic_req   (icache_req),
+      .fetch_pc (IFU_fetch_pc),
       .pc       (IFU_pc),
       .snpc     (IFU_snpc),
       .inst     (IFU_inst),
       .irom_data(icache_rdata),
+      .pred_taken_out (IFU_pred_taken),
+      .pred_target_out(IFU_pred_target),
+      .pred_index_out (IFU_pred_index),
 
       .ready(IDU_ready),
       .valid(IFU_valid)
@@ -317,7 +404,10 @@ assign debug_ifu_pc    = IFU_pc;
   // ---- 前递值两级口径（都送给 Control 选前递源）----
   // MEM 级：普通算术/地址类前递 EX 结果，跳转/CSR 前递已经准备好的 rd_value（EXU 级同款）。
   logic [31:0] MEM_forward_val;
-  assign MEM_forward_val = (LSU_jump_flag | (|LSU_csr_wen)) ? LSU_rd_value : LSU_Ex_result;
+  // ★ v15：MEM 级的 load 若被 DCache 的 M1 探测口命中，前递值取**读回数据**（不是地址）。
+  assign MEM_forward_val = (MEM_m1_ok)                       ? LSU_Rdata_m1 :
+                           (LSU_jump_flag | (|LSU_csr_wen))   ? LSU_rd_value :
+                                                                LSU_Ex_result;
 
   // v9 修复（B6）：★ 不变量：jump / CSR 前递的必须是 rd_value（link 地址 / CSR 读值），不能是
   //   Ex_result（对 jump 那是**跳转目标地址**）；判据是独热码非零 `|csr_wen`，不是 ==1。
@@ -326,7 +416,7 @@ assign debug_ifu_pc    = IFU_pc;
   assign EXU_forward_val = (EXU_jump_flag | (|EXU_csr_wen)) ? EXU_rd_value : EXU_Ex_result;
   
   // ---- MEM 级现场（LSU 本级，第 1 级前递点）----
-  logic [31:0] LSU_Rdata_raw;         // WBU 收束前的原始读回数据（对齐/符号扩展在 WBU 里做）
+  // v11（S3）：LSU_Rdata_raw 删除（全工程零读者）。
   logic [2:0] LSU_funct3;
 
   // ---- MEM2 / WB 级现场（LSU 输出给 WBU 的整套写回信息）----
@@ -385,12 +475,16 @@ assign debug_ifu_pc    = IFU_pc;
       .fence_i_flag(EXU_fence_i_flag),
 
       .MEM_mem_ren(LSU_mem_ren),
+      .MEM_m1_ok  (MEM_m1_ok),
       .MEM_PIPE_mem_ren(LSU_mem_ren_pipe),
 
       .IDU_rs1(IDU_rs1),
       .IDU_rs2(IDU_rs2),
 
       .IDU_valid(IDU_valid),
+      // ★ v13.2（P0）：系统指令提交许可（Control 内部的 ecall/mret 门控要用它）
+      .IDU_ready(IDU_ready),
+      .sys_commit_ok(sys_commit_ok_ctrl),
       .EXU_valid(EXU_valid),
       .MEM_valid(LSU_valid),
       .MEM_PIPE_valid(LSU_valid_pipe),
@@ -402,6 +496,12 @@ assign debug_ifu_pc    = IFU_pc;
       .MEM2_rd(LSU_rd_wb),
       .EXU_mem_ren(EXU_mem_ren),
       .EXU_R_Wen(EXU_R_wen),
+      // v10 新增（C10）：CSR RAW 前递的输入（EX 级写使能位图）
+      .EXU_csr_wen(EXU_csr_wen),
+      // v10.2 新增：CSR 读口 RAW 前递（同一份影子链，服务所有 CSRR* 读）
+      .IDU_csr_sel(IDU_csr_sel),
+      .csr_rd_fwd(csr_rd_fwd_val),
+      .csr_rd_fwd_en(csr_rd_fwd_en),
       .MEM_R_Wen(LSU_R_wen),
       .MEM_PIPE_R_Wen(LSU_R_wen_pipe),
       .MEM2_R_Wen(LSU_R_wen_wb),
@@ -417,7 +517,7 @@ assign debug_ifu_pc    = IFU_pc;
       .EXU_rs1_in    (EXU_rs1_in),
       .EXU_rs2_in    (EXU_rs2_in),
       .dnpc          (dnpc),
-      .icache_clr    (icache_clr),
+      // v11（S1）：.icache_clr 不再接 —— ICache 旁路后无人消费它。Control 端口保留。
       .EXU_inst_clear(EXU_inst_clear),
       .dnpc_flag     (dnpc_flag),
       .bp_update_en  (bp_update_en),
@@ -436,12 +536,38 @@ assign debug_ifu_pc    = IFU_pc;
       .EXU_iaddr_misalign_exc   (EXU_iaddr_misalign_exc),
       .EXU_fault_inst           (EXU_fault_inst),
       .trap_take                (trap_take),
-      .trap_take_q              (trap_take_q),
       .trap_cause               (trap_cause),
       .fault_addr               (fault_addr),
       .fault_inst               (fault_inst),
-      .exc_pending              (exc_pending)
+      .fault_pc                 (fault_pc),
+      .exc_pending              (exc_pending),
+      // v12（B）：系统重定向观察口（直通，见 Control.sv 的端口说明）
+      .system_redirect_dbg      (system_redirect)
   );
+
+  // ==== v11（S4）：RAS 的 call/ret 分类 =========================================
+  //   为什么需要单独打一拍：bp_update_en 是 **EX 级**控制流指令被解析的那一拍
+  //   （Control: EXU_valid & (branch_flag|jump_flag)），而 IDU_inst_d 是"本拍正进入 EX"的
+  //   指令 —— 晚一拍。这里把 IDU_inst_d 打一拍，与 EX 级现场严格对齐
+  //   （与 EXU 内部 fault_inst_reg 的口径完全一样，见 EXU.sv 的 fault_inst_reg）。
+  //   分类口径按 RISC-V psABI 的惯例：
+  //     call = (jal|jalr) 且 rd ∈ {x1, x5}      ← 压栈，记返回地址 pc+4
+  //     ret  = jalr x0, 0(x1|x5)                ← 弹栈
+  //   注意：预测错了只是**慢**（RAS 只影响预测，不影响任何交付值），所以这个分类允许有
+  //   边角不精确（例如把 tail-call 当 call），不会带来功能错误。
+  logic [31:0] EX_inst_for_ras;
+  logic        bp_is_call, bp_is_ret;
+  logic        inst_is_jal, inst_is_jalr;
+  // ★ 源必须是 **EXU 里已寄存的那条指令**（inst_reg_exc = fault_inst_reg），
+  //   与 bp_update_en 用的 branch_flag_reg/jump_flag_reg 同源同拍。
+  assign EX_inst_for_ras = EXU_inst_reg;
+  assign inst_is_jal  = (EX_inst_for_ras[6:0] == 7'h6F);
+  assign inst_is_jalr = (EX_inst_for_ras[6:0] == 7'h67);
+  assign bp_is_call = (inst_is_jal | inst_is_jalr)
+                   && ((EX_inst_for_ras[11:7] == 5'd1) || (EX_inst_for_ras[11:7] == 5'd5));
+  assign bp_is_ret  = inst_is_jalr && (EX_inst_for_ras[11:7] == 5'd0)
+                   && ((EX_inst_for_ras[19:15] == 5'd1) || (EX_inst_for_ras[19:15] == 5'd5))
+                   && (EX_inst_for_ras[31:20] == 12'd0);
 
   // ==== BPU_inst —— 跨 IF/EX 两级的分支预测器（2 位 BHT + BTB）：查询**组合**（fetch_pc →
   //   pred_taken/target/index，当拍随指令进 IDU/EXU），更新**同步**（update_en 那拍写表）。
@@ -450,7 +576,9 @@ assign debug_ifu_pc    = IFU_pc;
   Branch_Predictor BPU_inst (
       .clk           (cpu_clk),
       .reset         (cpu_rst),
-      .fetch_pc      (IFU_pc),
+      // ★ 不变量（v10）：必须接 IFU 的**取指侧** PC。接 IFU_pc（队头 PC）会让预测器
+      //   去查"两条指令之前那个地址"的预测，而 pred_* 又要随指令入队 —— 静默错位。
+      .fetch_pc      (IFU_fetch_pc),
       .pred_taken    (bp_pred_taken),
       .pred_target   (bp_pred_target),
       .pred_index    (bp_pred_index),
@@ -460,6 +588,8 @@ assign debug_ifu_pc    = IFU_pc;
       .update_taken  (bp_update_taken),
       .update_target (bp_update_target),
       .update_correct(~bp_mispredict),
+      .update_is_call(bp_is_call),
+      .update_is_ret (bp_is_ret),
       .pred_cnt      (bp_pred_cnt),
       .hit_cnt       (bp_hit_cnt),
       .miss_cnt      (bp_miss_cnt)
@@ -489,10 +619,14 @@ assign debug_ifu_pc    = IFU_pc;
 
       .EXU_rs1_in  (EXU_rs1_in),
       .EXU_rs2_in  (EXU_rs2_in),
-      .pred_taken_in (bp_pred_taken),
-      .pred_target_in(bp_pred_target),
-      .pred_index_in (bp_pred_index),
+      // ★ 不变量（v10）：预测信息**随指令走**，必须接 IFU 队头那一份（IFU_pred_*），
+      //   不能再接 bp_pred_*（那是"当前取指侧 PC"的预测，属于两条指令之后的地址）。
+      .pred_taken_in (IFU_pred_taken),
+      .pred_target_in(IFU_pred_target),
+      .pred_index_in (IFU_pred_index),
       .intr_take   (intr_take),
+      // ★ v13.2（P0）：只有"确实会提交"的那一拍，ecall/mret 才会改 CSR
+      .sys_commit_ok(sys_commit_ok_ctrl),
       .intr_pending(IDU_intr_pending),
       .branch_pc   (IDU_branch_pc),
       .rd_next     (IDU_rd),
@@ -547,10 +681,19 @@ assign debug_ifu_pc    = IFU_pc;
       //     悬空成 x 后 mcause/mtval 永远写不进去，实测"陷入次数对、但 mcause 恒 0、mtval 恒 x"，
       //     而工具只给一个 vopt-2718 Missing connection 的 Warning。见 §MYCPU-7
       .trap_take   (trap_take),
-      .trap_take_q (trap_take_q),
       .trap_cause  (trap_cause),
       .fault_addr  (fault_addr),
-      .fault_inst  (fault_inst)
+      .fault_inst  (fault_inst),
+      .fault_pc    (fault_pc),
+      // v10.2 新增：CSR 读口 RAW 前递（csr_sel 发出，前递值收回）
+      .csr_sel      (IDU_csr_sel),
+      .csr_rd_fwd_en(csr_rd_fwd_en),
+      .csr_rd_fwd   (csr_rd_fwd_val),
+
+      // ★ v12（B）Zicntr：retire 来自 LSU 的 WB 入口（见 LSU.sv 的 retire_wb），
+      //   mcycle_dbg 是 CSR 计数器的低 32 位直通（纯观察）。
+      .retire       (LSU_retire_wb),
+      .mcycle_dbg   (IDU_mcycle_dbg)
 
   );
 
@@ -627,6 +770,7 @@ assign debug_ifu_pc    = IFU_pc;
       // v9 修复（C4 遗留）：★ 不变量：**必须接 IDU_inst_d，不是 IFU_inst** —— 它要与同拍的
       //   illegal_in 配对（inst_d(T)=IFU_inst(T-2)），接错会把别的指令写进 mtval。见 §MYCPU-4
       .fault_inst_in            (IDU_inst_d),
+      .inst_reg_exc             (EXU_inst_reg),
       // v9 新增（C4）：异常输出（锁存后与 EX 级指令一一对应）
       .illegal_exc              (EXU_illegal_exc),
       .mem_misalign_exc         (EXU_mem_misalign_exc),
@@ -660,7 +804,10 @@ assign debug_ifu_pc    = IFU_pc;
 
       .R_wen_next    (LSU_R_wen),
       .LSU_Rdata     (LSU_Rdata),
-      .LSU_Rdata_raw (LSU_Rdata_raw),
+      .m1_hit        (dcache_m1_hit),
+      .m1_rdata      (dcache_m1_rdata),
+      .LSU_Rdata_m1  (LSU_Rdata_m1),
+      .m1_load_ok    (MEM_m1_ok),
       .funct3_next   (LSU_funct3),
       .csr_wen_next  (LSU_csr_wen),
       .Ex_result_next(LSU_Ex_result),
@@ -703,7 +850,13 @@ assign debug_ifu_pc    = IFU_pc;
       .ready_last(LSU_ready),
 
       .ready_next(WBU_ready),
-      .valid_next(LSU_valid)
+      .valid_next(LSU_valid),
+
+      // ★ v12（B）：退休脉冲（= 本拍有一条有效指令推进到 WB 级）→ IDU 的 minstret。
+      //   注意它与下面的 lsu_adv 是**同一式**（ready_next & ~lsu_freeze），只是额外与了
+      //   valid_reg_pipe —— 前者回答"推没推进"，后者回答"推进的是不是一条真指令"。
+      .retire_wb(LSU_retire_wb),
+      .req_seq  (lsu_req_seq)
 
   );
 
@@ -711,6 +864,19 @@ assign debug_ifu_pc    = IFU_pc;
   //   cpu_wen/addr/wdata/mask 出去、cpu_rdata 回来，背压反过来（用 hold 冻结 LSU）。cpu_en =
   //   LSU_mem_ren_pipe | lsu_bus_wen；store 请求由 DCache 寄存成**单拍脉冲**（一次 store 只写一次）。
   //   ★ 容易漏接：`hold` 漏接则 load 缺失时用旧数据继续算，同样不报错。
+  //   ★ 容易漏接（v10.1 新增）：`cpu_adv` 必须与 LSU 内部推进条件**同式**
+  //     （LSU.sv: `ready_next & ~lsu_freeze`，其中 lsu_freeze = mem_hold | mdu_busy）。
+  //     漏接/接错 → 一条 store 在 MDU 忙期间被写成多拍（测试台 write-once 断言抓到
+  //     同地址连写 4 拍）；反过来若用状态机串行化，则背靠背的两条 store 里第二条被
+  //     静默丢弃（v10.1 修掉的真 bug）。两个方向都错，只能靠这个推进信号。
+  logic lsu_adv;
+  logic lsu_req_seq;   // ★ v14（P4）：LSU 的请求身份证 → DCache
+  // ★ v15（load-use）：DCache 的 M1 命中探测口 ↔ LSU
+  logic        dcache_m1_hit;   // M1 地址命中（数据本拍可用）
+  logic [31:0] dcache_m1_rdata; // M1 地址的整字
+  logic [31:0] LSU_Rdata_m1;    // 按 M1 的 funct3/偏移选道后的值
+  logic        MEM_m1_ok;       // 本拍 MEM 级 load 数据可用（供前递 + 免停）
+  assign lsu_adv = WBU_ready & ~dcache_hold & ~EXU_mdu_busy;
   DCache DCache_inst (
       .clk       (cpu_clk),
       .reset     (cpu_rst),
@@ -719,6 +885,12 @@ assign debug_ifu_pc    = IFU_pc;
       .cpu_addr  (lsu_bus_addr),
       .cpu_wdata (lsu_bus_wdata),
       .cpu_mask  (lsu_bus_mask),
+      .cpu_adv   (lsu_adv),
+      .req_seq   (lsu_req_seq),
+      .m1_addr   (LSU_Ex_result),
+      .m1_en     (LSU_mem_ren),
+      .m1_hit    (dcache_m1_hit),
+      .m1_rdata  (dcache_m1_rdata),
       .mem_rdata (perip_rdata),
       .cpu_rdata (lsu_bus_rdata),
       .mem_addr  (perip_addr),
@@ -736,8 +908,10 @@ assign debug_ifu_pc    = IFU_pc;
   // 外设总线读使能：直连 DCache 的 mem_en（只有本拍确实要发一次读才为 1，见端口处不变量）。
   assign perip_ren = dcache_mem_en;
 
-  // v9 修复（B8）：irom_en 就是 ICache 的 mem_en（ICache 内部 cpu_en_r 上电后恒为 1，所以它
-  //   实际一直为 1）—— 显式引出是为了不再依赖层次化引用，并给 SoC 侧留出按 ren 门控的余地。
+  // v9 修复（B8）：irom_en 就是 ICache 的 mem_en，必须走顶层端口引出（不再依赖层次化引用）。
+  //   v10：它现在**真的会门控**了 —— mem_en = cpu_req，只在 IFU 真发一次取指那拍为 1；
+  //   队列满 / 重定向 / 复位期间都为 0，IROM 不读（板级 sync_mem 的 ren=0 时 rdata 保持，
+  //   因此消费侧必须只看 resp_valid=1 的拍，见 ICache.sv 的不变量）。
   assign irom_en = icache_mem_en;
 
   // ==== WBU_inst0 —— 写回级（WB 级，流水线终点）：最终收束点 —— 无论结果来自 ALU、访存还是

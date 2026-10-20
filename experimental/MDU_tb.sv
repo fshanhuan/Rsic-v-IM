@@ -1,6 +1,6 @@
 // MDU_pipelined 的独立测试台顶层（配合 C++ 参考模型使用）
 // 构建示例：
-//   verilator --cc --exe --build -Wno-lint -Wno-style \
+// - verilator --cc --exe --build -Wno-lint -Wno-style \
 //     --top-module mdu_tb_top MDU_tb.sv MDU_pipelined.sv ../../para.sv main.cpp
 `timescale 1ns / 1ps
 module mdu_tb_top (

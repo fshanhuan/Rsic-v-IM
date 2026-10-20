@@ -107,7 +107,14 @@ module EXU (
     output logic [2:0] mem_misalign_funct3_exc,
     output logic iaddr_misalign_exc,
     // 出错指令的原始编码（随流水锁存），送去 Control 写 mtval（见文件末尾 assign 处的说明）
-    output logic [31:0] fault_inst_exc
+    output logic [31:0] fault_inst_exc,
+    // ★ v11（S4）：EX 级**已寄存**的指令原码 —— 给返回地址栈做 call/ret 分类用。
+    //   为什么必须从 EXU 里拿、不能用 IDU 的 inst_d：bp_update_en 是"EX 级这条控制指令
+    //   被解析"那一拍（Control: EXU_valid & (branch|jump)，用的是 *_reg 那一组），
+    //   而 IDU_inst_d 描述的是**正进入 EX** 的下一条 —— 实测 jalr 那一拍 IDU_inst_d 是 0
+    //   （重定向后的气泡），于是 ret 永远识别不出来（探针见 docs/优化_v11_进度.md）。
+    //   fault_inst_reg 与 branch_flag_reg/jump_flag_reg 同源同拍，相位天然对齐。
+    output logic [31:0] inst_reg_exc
 );
 
 
@@ -147,10 +154,23 @@ module EXU (
     logic        iaddr_misalign_reg;
     logic [31:0] fault_inst_reg;
 
-    // EX 级**实际**跳转/分支目标的低 2 位：branch/jal 在 IDU 里都映射成 add1+add2（PC+imm），
-    //   jalr 的目标 bit0 被硬件清零。**必须具名**：SV 不允许对表达式结果直接位选 `(a+b)[1:0]`
-    logic [1:0]  branch_target_low2;
-    assign branch_target_low2 = (add1_reg + add2_reg) & 32'h3;
+    // 指令地址非对齐判定用的"目标地址低 2 位"。
+    // ★ v10 修复（C11）：必须用**本拍正在接收的那条**指令的端口 add1/add2 —— 不能用
+    //   add1_reg/add2_reg（后者描述的是**上一条**指令，于是异常总是晚一条触发：
+    //   实测 exc_jal_misalign 里 `jal x5,+2` 一次都没陷入）。
+    // ★ v10 修复（C11b）：还要区分"跳转"和"条件分支"—— 两者的 add1/add2 口径**不同**：
+    //     jal  : add1=PC,   add2=imm   ⇒ 目标 = add1+add2
+    //     jalr : add1=rs1,  add2=imm   ⇒ 目标 = (add1+add2) 的 bit0 由硬件清零
+    //     branch: add1=rs1, add2=rs2   ⇒ 这是**比较操作数**，根本不是目标！
+    //   条件分支的目标在 IDU 就算好了，是 branch_pc = PC+imm_B。
+    //   原来一律用 add1+add2，于是 `blt x1,x3,-8` 被算成 1+10=11（低 2 位 11）→ 每轮
+    //   凭空陷入一次（实测 prog_loop 每 11 拍重启一次，x1 永远到不了 10）。
+    logic [1:0] jump_target_low2;
+    assign jump_target_low2 = add1[1:0] + add2[1:0];   // 低 2 位求和只需 2 位加法器
+    logic [1:0] iaddr_target_low2;
+    assign iaddr_target_low2 = jump_flag ? {1'b0, jump_target_low2[1]}   // bit0 被硬件清零
+                                         : branch_pc[1:0];               // 条件分支的真实目标
+    // ★ 不变量：仍然**不许**改用组合的 exec_res（掺了 inv_flag/MDU 选择，且是后置声明）。
 
     // —— 时序化 MDU 的“等结果”握手：操作数在 T 沿锁存、结果 T+1 沿之后才上 res（除法还要 32 拍
     //    迭代），这拍若放行，下游会把**还没更新的 EX_result 旧值**当成运算结果采走。
@@ -333,11 +353,12 @@ always_ff @(posedge clock) begin
         mem_misalign_f3_reg <= mem_misalign_funct3_in;
         fault_inst_reg      <= fault_inst_in;
         // 指令地址非对齐：**实际**目标要 2 字节对齐 —— branch=PC+imm_B、jal=PC+imm_J、jalr 的 bit0
-        //   被硬件清零天然对齐，所以统一判 branch_target_low2。
-        // ★ 不变量：判据只用**已锁存**的 add1_reg/add2_reg/branch_flag_reg/jump_flag_reg，**不许**
-        //   改用组合的 exec_res（掺了 inv_flag/MDU 选择，且是后置声明）—— 给跨级关键路径减负。
-        iaddr_misalign_reg  <= ((branch_flag_reg | jump_flag_reg)
-                                & (branch_target_low2 != 2'b00));
+        //   被硬件清零天然对齐，所以统一判 branch_target_low2_in。
+        // ★ v10（C11）：判据用**端口** add1/add2/branch_flag/jump_flag（= 本拍正在接收的
+        //   这条指令），与上一行的 illegal_in/mem_misalign_in 同源同拍。原来用的是
+        //   add1_reg/branch_flag_reg（上一条指令），导致异常晚一条触发。见文件上方说明。
+        iaddr_misalign_reg  <= ((branch_flag | jump_flag)
+                                & (iaddr_target_low2 != 2'b00));
     end
 end
 
@@ -378,6 +399,7 @@ end
     assign mem_misalign_funct3_exc  = mem_misalign_f3_reg;
     assign iaddr_misalign_exc       = iaddr_misalign_reg & valid_next;
     assign fault_inst_exc           = fault_inst_reg;
+    assign inst_reg_exc             = fault_inst_reg;   // v11（S4）：RAS 的 call/ret 分类源
 
 
 /* verilator lint_off PINMISSING */

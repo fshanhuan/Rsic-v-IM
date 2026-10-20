@@ -1,4 +1,4 @@
-# Rsic-v-IM —— v9：RV32IM 处理器 + FPGA 上板工程
+# Rsic-v-IM —— RV32IM 处理器 + FPGA 上板工程（当前代码：v17）
 
 > **工具链：Vivado 2025.2 / 目标板：依元素 EES-331 / 器件：`xc7z020clg484-1`**
 >
@@ -10,7 +10,59 @@
 > 的工作副本，每次构建前会从"仓库正本"覆盖 RTL —— 那套两棵树同步机制已经退休，
 > 详见 §4.1 末尾。
 
-**当前状态：已上板跑通并抓过波形；板上 ILA 抓出并已修复一个真实功能 bug（v9 B9）。**
+---
+
+## 0. v17 现状（2026-10-20）
+
+> ⚠️ **本文正文（§1 起）写于 v9**：讲的是「上板 + ILA 抓波形」那套流程，**流程仍然适用**。
+> 但从 v9 到 v17 核本身改动很多（引导器、UART、shell、Cache 与分支预测改版），
+> **所有性能/资源数字以本节为准，不要引用 §1 表格里 v9 的 WNS 与 LUT。**
+
+| 指标 | v9（正文，小配置） | **v17（当前 `rtl/`）** |
+| --- | --- | --- |
+| 时钟 | 50 MHz | 50 MHz；WNS **+0.048 ns** / WHS +0.015 ns（⚠ 余量已贴线） |
+| LUT / FF | 13 012 / 14 776 | **36 150（67.9%）/ 34 058（32.0%）** |
+| Block RAM | 38.5 tile | **66.5 tile**（IROM 64 KB + DRAM 128 KB） |
+| CoreMark 1.0 | 未测 | **128.82 iter/s = 2.576 CoreMark/MHz**（1400 次迭代，10.868 s，CRC 官方值） |
+| 取指 | I-Cache 64 行 | 直连 IROM 同步读；新增数据窗口 `0x0002_0000..0x0002_FFFF`（可读可写） |
+| 分支预测 | BTB/PHT 64 + GHR 6 | **BTB/PHT 256 + GHR 8 + RAS 8** |
+| 数据缓存 | 64 行 | **256 行**，并加了 M1 探测读口（load-use 由 2 拍降到 1 拍） |
+| 外设 | 无 | UART 115200 收发 + 8 深 RX FIFO + LED×7 + 500 kHz `mtime` |
+| 软件 | 手写 hex 程序 | **C 工具链**（rv32 gcc 13.2）+ CoreMark + FreeRTOS 移植 + 16 命令 shell |
+
+### 0.1 相对 v9 的能力增量
+
+- **串口引导**：上电由 `board/boot_loader.sv` 从 UART 收镜像写入 IROM，校验通过后释放 CPU；
+  运行期用 shell 的 `b` 命令可重回引导器，不必按键复位。
+- **交互 shell**（`sw/monitor.c`）：`h d p w c l f m k u i e b` + `L` / `D` / `r`，带行编辑、`^U`/`^C`、4 条历史。
+- **C 应用 load-and-run**：`L` 把 hex 字流写进代码区、`D` 灌 `.rodata/.data`、`r` 跳转执行，
+  应用可以正常 `return` 回 shell——改程序不用重新综合比特流。
+- **性能**：v13.5 → v15 两轮改动把 CoreMark 从 2.335 提到 **2.576 CoreMark/MHz（+10.3%）**；
+  `load-use` 停拍 −55%（50 339 → 22 681 拍），总周期 −5.9%。
+- **文档索引**：
+  - 本轮总账：[`docs/CHECKPOINT_v14.md`](docs/CHECKPOINT_v14.md)（分支预测扫参、双读口、load-use 1 拍、MMIO 重复读缺陷、shell、load-and-run）
+  - 前序：[`docs/CHECKPOINT_v12.md`](docs/CHECKPOINT_v12.md)、[`docs/CHECKPOINT_v13.md`](docs/CHECKPOINT_v13.md)、
+    [`docs/IMPLEMENTATION_v10.md`](docs/IMPLEMENTATION_v10.md)、[`docs/IMPLEMENTATION_v11.md`](docs/IMPLEMENTATION_v11.md)
+  - 工具链与 RTOS：[`docs/C_工具链与RTOS.md`](docs/C_工具链与RTOS.md)；串口/GPIO：[`docs/BOOT_UART.md`](docs/BOOT_UART.md)、[`docs/CONSOLE_GPIO.md`](docs/CONSOLE_GPIO.md)
+  - 产品级汇总：[`docs/BigBird_RV32_产品报告_v17.docx`](docs/BigBird_RV32_产品报告_v17.docx)（18 页：规格、关键技术、性能、资源时序、验证、风险与路线图）
+
+### 0.2 怎么跑（v17）
+
+```bash
+# 仿真侧：CoreMark（Verilator 全 RTL；脚本会用 sw/ 下的 C 源码现编）
+bash sw/run_coremark.sh
+# 单测：IROM 数据窗口自检
+bash sw/run_dptest.sh
+```
+
+板上流程仍是 §1~§3 那套（Vivado 建工程 → 烧录 → 串口），差别是：
+现在**先灌引导镜像、再用 UART 灌程序**，不再 `$readmemh` 固化。
+
+> ⚠️ `_diag/`（一键验收脚本：`regress.ps1` 38 项回归、`board_smoke.ps1` 6 项上板自检、
+> `load_app.ps1` 加载执行）按本仓库既有约定**不入库**；等价的手工命令见
+> `docs/CHECKPOINT_v14.md` §7「一键验收」。
+
+**v9 阶段状态（历史，仅作对照；当前状态见 §0）**
 
 | 指标 | 实测值（**v9 B9 重建后**） |
 | --- | --- |

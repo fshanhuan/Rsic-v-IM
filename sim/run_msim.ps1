@@ -129,6 +129,58 @@ $results += [pscustomobject]@{ Prog = 'tb_dcache_unit'; Mode = 'unit'; Result = 
 $dcMark = if ($dcOk) { 'OK  ' } else { 'BAD ' }
 Write-Host ("  [{0}] {1,-16} {2}" -f $dcMark, 'tb_dcache_unit', $dcMsg)
 
+# ------------------------------------- 2b) v10 system tests (sys / exc) ------
+# Why these were not run under ModelSim before: they were added in v10.2/v10.3
+# and this driver was never extended. They need no generated copy (no
+# $dumpvars), so they compile straight from sim/.
+#
+# NOTE (v10.3): the FIRST time this section ran, vlog rejected rtl/IDU.sv with
+#   (vlog-2388) 'ebreak_flag' already declared in this scope
+# because three signals were assigned before their `logic` declaration.
+# iverilog only warned and Verilator did not flag it at all -- a third
+# simulator with a stricter front end found it. Keep this section in the
+# regression so that class of defect cannot come back unnoticed.
+Write-Host "`n=== [2b/3] v10 system tests: tb_sys x5 + tb_exc x3 ===" -ForegroundColor Cyan
+$SysRuns = @(
+    @{ tb = 'tb_sys'; tag = 'csr';    args = @('+prog=sim/sys_csr.hex',    '+kind=csr')    },
+    @{ tb = 'tb_sys'; tag = 'intr';   args = @('+prog=sim/sys_intr.hex',   '+kind=intr')   },
+    @{ tb = 'tb_sys'; tag = 'fencei'; args = @('+prog=sim/sys_fencei.hex', '+kind=fencei') },
+    @{ tb = 'tb_sys'; tag = 'ebreak'; args = @('+prog=sim/sys_ebreak.hex', '+kind=ebreak') },
+    @{ tb = 'tb_sys'; tag = 'zicsr';  args = @('+prog=sim/sys_zicsr.hex',  '+kind=zicsr')  },
+    @{ tb = 'tb_exc'; tag = 'illegal';      args = @('+prog=sim/exc_illegal.hex',      '+expect_kind=illegal')      },
+    @{ tb = 'tb_exc'; tag = 'misalign';     args = @('+prog=sim/exc_misalign.hex',     '+expect_kind=misalign')     },
+    @{ tb = 'tb_exc'; tag = 'jal_misalign'; args = @('+prog=sim/exc_jal_misalign.hex', '+expect_kind=jal_misalign') }
+)
+$sysSrcOk = $true
+& $vlog -sv -quiet -suppress 7061 -work work '+incdir+.' '+incdir+rtl' 'sim/tb_sys.sv' 'sim/tb_exc.sv'
+if ($LASTEXITCODE -ne 0) {
+    $sysSrcOk = $false
+    Write-Host "  [BAD ] vlog of sim/tb_sys.sv + sim/tb_exc.sv failed" -ForegroundColor Red
+}
+foreach ($r in $SysRuns) {
+    if (-not $sysSrcOk) {
+        $results += [pscustomobject]@{ Prog = $r.tb; Mode = $r.tag; Result = 'compile failed'; OK = $false }
+        continue
+    }
+    $log = Join-Path $LogDir ("msim_{0}_{1}.log" -f $r.tb, $r.tag)
+    $vargs = @('-c', '-quiet', '-suppress', '7061', '-L', 'work', "work.$($r.tb)") +
+             $r.args + @('-do', 'run -all; quit -f')
+    & $vsim @vargs 2>&1 | Out-File -Encoding utf8 $log
+    $txt = Get-Content $log -Raw
+    $ok = $false
+    $msg = 'NO VERDICT in log (load error?)'
+    if ($txt -match '\[(SYS|EXC)-SELFCHECK\] status=PASS \((\d+) checks\)') {
+        $ok = $true; $msg = "PASS $($Matches[2]) checks"
+    }
+    elseif ($txt -match 'status=FAIL \((\d+) failed, (\d+) passed\)') {
+        $msg = "FAIL $($Matches[1]) of $([int]$Matches[1] + [int]$Matches[2])"
+    }
+    elseif ($txt -match 'status=TIMEOUT') { $msg = 'TIMEOUT' }
+    $results += [pscustomobject]@{ Prog = $r.tb; Mode = $r.tag; Result = $msg; OK = $ok }
+    $mark = if ($ok) { 'OK  ' } else { 'BAD ' }
+    Write-Host ("  [{0}] {1,-10} {2,-12} {3}" -f $mark, $r.tb, $r.tag, $msg)
+}
+
 # ------------------------------------------------------------------ 3) summary
 $bad = @($results | Where-Object { -not $_.OK })
 Write-Host "`n=== [3/3] SUMMARY ===" -ForegroundColor Cyan

@@ -1,20 +1,28 @@
 ﻿
-Prog           Mode   Result       OK
-----           ----   ------       --
-prog           normal PASS 35/35 True
-prog           strict PASS 35/35 True
-prog_mul       normal PASS 34/34 True
-prog_mul       strict PASS 34/34 True
-prog_div       normal PASS 34/34 True
-prog_div       strict PASS 34/34 True
-prog_load_lane normal PASS 34/34 True
-prog_load_lane strict PASS 34/34 True
-prog_load_use  normal PASS 34/34 True
-prog_load_use  strict PASS 34/34 True
-prog_loop      normal PASS 34/34 True
-prog_loop      strict PASS 34/34 True
-prog_div_pair  normal PASS 34/34 True
-prog_div_pair  strict PASS 34/34 True
-tb_dcache_unit unit   PASS       True
+Prog           Mode         Result           OK
+----           ----         ------           --
+prog           normal       PASS 35/35     True
+prog           strict       PASS 35/35     True
+prog_mul       normal       PASS 34/34     True
+prog_mul       strict       PASS 34/34     True
+prog_div       normal       PASS 34/34     True
+prog_div       strict       PASS 34/34     True
+prog_load_lane normal       PASS 34/34     True
+prog_load_lane strict       PASS 34/34     True
+prog_load_use  normal       PASS 34/34     True
+prog_load_use  strict       PASS 34/34     True
+prog_loop      normal       PASS 34/34     True
+prog_loop      strict       PASS 34/34     True
+prog_div_pair  normal       PASS 34/34     True
+prog_div_pair  strict       PASS 34/34     True
+tb_dcache_unit unit         PASS           True
+tb_sys         csr          PASS 16 checks True
+tb_sys         intr         PASS 9 checks  True
+tb_sys         fencei       PASS 5 checks  True
+tb_sys         ebreak       PASS 9 checks  True
+tb_sys         zicsr        PASS 25 checks True
+tb_exc         illegal      PASS 7 checks  True
+tb_exc         misalign     PASS 8 checks  True
+tb_exc         jal_misalign PASS 5 checks  True
 
 

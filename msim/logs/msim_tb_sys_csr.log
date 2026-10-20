@@ -1,0 +1,64 @@
+﻿Reading E:/FPGA/ModelSim_10.5se/tcl/vsim/pref.tcl
+
+# 10.5
+
+# vsim -c -quiet -suppress 7061 -L work work.tb_sys "+prog=sim/sys_csr.hex" "+kind=csr" -do "run -all; quit -f" 
+# Start time: 01:10:07 on Oct 18,2026
+# ** Note: (vsim-3812) Design is being optimized...
+# ** Warning: rtl/myCPU.sv(396): (vopt-2685) [TFMPC] - Too few port connections for 'Control_inst0'.  Expected 75, found 74.
+# ** Warning: rtl/myCPU.sv(396): (vopt-2718) [TFMPC] - Missing connection for port 'icache_clr'.
+# ** Warning: sim/tb_sys.sv(80): (vopt-2685) [TFMPC] - Too few port connections for 'u_cpu'.  Expected 27, found 24.
+# ** Warning: sim/tb_sys.sv(80): (vopt-2718) [TFMPC] - Missing connection for port 'debug_ifu_pc'.
+# ** Warning: sim/tb_sys.sv(80): (vopt-2718) [TFMPC] - Missing connection for port 'debug_ready'.
+# ** Warning: sim/tb_sys.sv(80): (vopt-2718) [TFMPC] - Missing connection for port 'debug_dnpc_flag'.
+# //  ModelSim SE-64 10.5 Feb 13 2016 
+# //
+# //  Copyright 1991-2016 Mentor Graphics Corporation
+# //  All Rights Reserved.
+# //
+# //  ModelSim SE-64 and its associated documentation contain trade
+# //  secrets and commercial or financial information that are the property of
+# //  Mentor Graphics Corporation and are privileged, confidential,
+# //  and exempt from disclosure under the Freedom of Information Act,
+# //  5 U.S.C. Section 552. Furthermore, this information
+# //  is prohibited from disclosure under the Trade Secrets Act,
+# //  18 U.S.C. Section 1905.
+# //
+# run -all
+# ================================================================
+#  tb_sys : program=sim/sys_csr.hex  kind=csr
+# ================================================================
+# 
+# ------------ system checks (kind=csr) ------------
+#   trap events = 0   intr events = 0   icache_clr = 0
+#   first : mcause=deadbeef mepc=deadbeef mtval=deadbeef
+#   last  : mcause=deadbeef
+#   regs  : x5=00000000 x6=00000001 x7=12345678 x8=12345678 x9=1234f678 x11=1234f678
+#           x12=12340678 x13=12340678 x14=12340678 x15=0000001f x16=0000001f x17=0000001d
+#           x18=79737978 x19=016fbcbd x20=00000000 x21=00000000 x22=00000000 x23=00000000 x24=00000000 x25=ffffffff x26=00001800
+#           x28=00000000 x27=00000000 x30=00000000 x31=00000000 (addr/hartid/mimpid/mconfigptr, zicsr)
+#   icache: hit=0 miss=0
+#   total cycles = 39
+#   [PASS] no traps: all CSR forms legal
+#   [PASS] csrrw returns old value 0
+#   [PASS] csrr right after csrw sees new (fwd)
+#   [PASS] csrrs returns old value
+#   [PASS] csrrs sets bits -> 0x1234F678
+#   [PASS] csrrc returns old value
+#   [PASS] csrrc rs1=x0 is pure read
+#   [PASS] csrrc cleared only the given bits
+#   [PASS] csrrwi returns old value
+#   [PASS] csrrwi wrote uimm=31
+#   [PASS] csrrsi returns old value
+#   [PASS] csrrci clears bit1 -> 29
+#   [PASS] read-only CSR with rs1!=0 -> readval
+#   [PASS] marchid is read-only
+#   [PASS] mtimecmp reset value all ones
+#   [PASS] mstatus reset MPP=M
+# --------------------------------------------------
+# [SYS-SELFCHECK] status=PASS (16 checks)
+# ==================================================
+# ** Note: $finish    : sim/tb_sys.sv(374)
+#    Time: 525 ns  Iteration: 1  Instance: /tb_sys
+# End time: 01:10:09 on Oct 18,2026, Elapsed time: 0:00:02
+# Errors: 0, Warnings: 6

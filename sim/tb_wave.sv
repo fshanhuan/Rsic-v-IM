@@ -96,8 +96,9 @@ module tb_wave #(
     wire        p_pred_taken = u_cpu.bp_pred_taken;
     wire [31:0] p_pred_tgt   = u_cpu.bp_pred_target;
     wire        p_mispredict = u_cpu.bp_mispredict;
-    wire [31:0] p_icache_hit = u_cpu.icache_hit_cnt;
-    wire [31:0] p_icache_mis = u_cpu.icache_miss_cnt;
+    // v11（S1）：ICache 已旁路，计数器恒 0（改用顶层 debug 端口，避免层次化引用失效）
+    wire [31:0] p_icache_hit = u_cpu.debug_icache_hit_cnt;
+    wire [31:0] p_icache_mis = u_cpu.debug_icache_miss_cnt;
 
     // 寄存器堆观测（x1..x10）
     wire [31:0] p_r1  = u_cpu.IDU_Inst0.Reg_Stack_inst0.Reg_inst.rf[1];

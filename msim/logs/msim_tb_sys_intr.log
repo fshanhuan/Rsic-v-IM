@@ -1,0 +1,55 @@
+﻿Reading E:/FPGA/ModelSim_10.5se/tcl/vsim/pref.tcl
+
+# 10.5
+
+# vsim -c -quiet -suppress 7061 -L work work.tb_sys "+prog=sim/sys_intr.hex" "+kind=intr" -do "run -all; quit -f" 
+# Start time: 01:10:10 on Oct 18,2026
+# ** Note: (vsim-8009) Loading existing optimized design _opt2
+# //  ModelSim SE-64 10.5 Feb 13 2016 
+# //
+# //  Copyright 1991-2016 Mentor Graphics Corporation
+# //  All Rights Reserved.
+# //
+# //  ModelSim SE-64 and its associated documentation contain trade
+# //  secrets and commercial or financial information that are the property of
+# //  Mentor Graphics Corporation and are privileged, confidential,
+# //  and exempt from disclosure under the Freedom of Information Act,
+# //  5 U.S.C. Section 552. Furthermore, this information
+# //  is prohibited from disclosure under the Trade Secrets Act,
+# //  18 U.S.C. Section 1905.
+# //
+# run -all
+# ================================================================
+#  tb_sys : program=sim/sys_intr.hex  kind=intr
+# ================================================================
+# [INTR1] cyc=27 IDpc=0000005c mcause_next=00000000
+# [INTR1-CSR] cyc=28 mcause=80000000 mepc=0000005c
+# [INTR2] cyc=58 IDpc=00000090 mcause_next=80000000
+# [INTR2-CSR] cyc=59 mcause=80000007 mepc=00000090
+# 
+# ------------ system checks (kind=intr) ------------
+#   trap events = 0   intr events = 2   icache_clr = 0
+#   first : mcause=80000000 mepc=0000005c mtval=00000000
+#   last  : mcause=80000007
+#   regs  : x5=00000037 x6=00000019 x7=00000000 x8=00000000 x9=00000000 x11=00000000
+#           x12=00000000 x13=00000000 x14=00000000 x15=00000000 x16=00000000 x17=00000000
+#           x18=00000000 x19=00000000 x20=80000007 x21=00000090 x22=00000000 x23=00000002 x24=00001880 x25=00000000 x26=0000005a
+#           x28=00000000 x27=ffffffff x30=00000000 x31=00000000 (addr/hartid/mimpid/mconfigptr, zicsr)
+#   icache: hit=0 miss=0
+#   total cycles = 82
+#   [PASS] two interrupts taken
+#   [PASS] no sync traps
+#   [PASS] sum 55: interrupted insn re-executed
+#   [PASS] second sum 25
+#   [PASS] last mcause = MTI (0x80000007)
+#   [PASS] handler ran twice (x23 == 2)
+#   [PASS] mstatus in handler: MIE=0 MPIE=1
+#   [PASS] program continued after both mret
+#   [PASS] mepc inside main program
+# --------------------------------------------------
+# [SYS-SELFCHECK] status=PASS (9 checks)
+# ==================================================
+# ** Note: $finish    : sim/tb_sys.sv(374)
+#    Time: 955 ns  Iteration: 1  Instance: /tb_sys
+# End time: 01:10:12 on Oct 18,2026, Elapsed time: 0:00:02
+# Errors: 0, Warnings: 0

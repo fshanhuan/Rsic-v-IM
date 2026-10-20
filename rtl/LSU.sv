@@ -34,7 +34,8 @@ module LSU (
     output [31:0] rd_value_next,
     output R_wen_next,
     output [31:0] LSU_Rdata,
-    output [31:0] LSU_Rdata_raw,
+    // v11（S3）：LSU_Rdata_raw 已删除 —— 全工程零读者（WBU 要的是 M3 的 rdata_wb_raw，
+    //   走的是另一根线），综合本来就会把它整条锥体 DCE 掉。删它只是为了让"谁在用哪个数据"唯一。
     output [2:0] funct3_next,
     output [15:0] csr_wen_next,
     output [31:0] Ex_result_next,
@@ -50,6 +51,12 @@ module LSU (
     output [1:0] mask,
     // 同步读返回的**原始整字**（来自 DCache 的 cpu_rdata）：字节/半字选道与符号扩展都在本模块做
     input [31:0] rdata,
+    /* ★ v15：DCache 的 M1 命中探测口。命中时 M1 当拍就拿到数据，
+     *   消费者因此可以少停 1 拍（见下 m1_load_ok 处的不变量）。 */
+    input  logic        m1_hit,
+    input  logic [31:0] m1_rdata,
+    output logic [31:0] LSU_Rdata_m1,
+    output logic        m1_load_ok,
     // 来自 DCache：同步 DRAM 的 load 未命中，需要把访存流水整体冻一拍后重试
     input mem_hold,
     // 来自 EXU：MDU 正在等结果，访存流水必须**同步冻结**，
@@ -83,9 +90,18 @@ module LSU (
     output logic ready_last,
 
     input ready_next,
-    output logic valid_next
+    output logic valid_next,
 
+    output logic retire_wb,
 
+    // ★ v14（P4 修法）：给 DCache 一个「本次总线请求的身份证」——
+    //   每进入 M2 一条新指令就翻转一位。DCache 用"寄存后的 req_seq 变没变"判断
+    //   "这是不是同一条请求"，这是**唯一**能区分下面两件事的信号：
+    //     · 同一条请求还在（数据已回、LSU 还没推进）→ 不该再发读；
+    //     · 同地址的下一条请求到了（`lw a0,0(x); lw a1,0(x)`）→ 必须再发读。
+    //   只比地址的话这两种情况长得一模一样，压掉后一种会让"同地址轮询"读到旧值。
+    //   翻转条件 = lsu_adv（M2 真的推进），冻结期间 lsu_adv=0 ⇒ 身份证不变。
+    output logic req_seq
 );
 
   logic        mem_ren_reg;
@@ -143,6 +159,26 @@ module LSU (
   logic [31:0] rdata_16u2;
   logic [31:0] rdata_wb2;
 
+  /* ---- v11（S6）：M2 级（_pipe）的读数据扩展与前瞻前递 ----------------------
+   * 为什么要单独一套：DCache 的命中路径是**同拍组合**的
+   *   （`cpu_rdata = hit_now ? data[index] : mem_rdata`，hit_now 直接由当拍的
+   *    cpu_en/cpu_addr 组合比较得出），所以当一条 load 停在 M2 时，`rdata` **本拍就是它的数据**；
+   *   未命中时 DCache 拉 hold，LSU 被冻结在 M2，数据同样在解冻那一拍的 `rdata` 上。
+   *   ⇒ 在 M2 就地按 M2 的偏移/位宽扩展一次，就能把 load 结果前递给"紧跟其后的消费者"，
+   *     不必等它走到 M3（那正是 load-use 多停 1 拍的原因）。
+   * ★ 反面踩坑（v11 第一版）：曾经把 M1 的 `rdata_ex` **寄存一拍**当 M2 前递源 —— 那是
+   *   "上一拍 rdata（属于前一条请求）+ 本条 M1 的偏移"的混搭，只在部分地址上碰巧相等；
+   *   表现为 prog 1 项、prog_load_use 2 项定向自检失败（周期数却变快了）。
+   *   结论：**必须在 M2 用当拍 rdata 重算**，不能搬 M1 的结果。
+   */
+  logic [31:0] rdata_byte_sel_pipe;
+  logic [31:0] rdata_half_sel_pipe;
+  logic [31:0] rdata_8i_pipe;
+  logic [31:0] rdata_16i_pipe;
+  logic [31:0] rdata_8u_pipe;
+  logic [31:0] rdata_16u_pipe;
+  logic [31:0] rdata_ex_pipe;
+
   // mem_hold / mdu_busy 期间必须把自己的一级也停住（ready_last 拉低），
   // 否则上级会把新指令推进来覆盖正在等待的那一条。
   // ★ 不变量：lsu_freeze 必须同时进 ready_last 与下面 always_ff 的推进条件（两处是同一个表达式）。
@@ -151,30 +187,73 @@ module LSU (
   logic lsu_freeze;
   assign lsu_freeze = mem_hold | mdu_busy;
 
+  // ★★ v15：M1 命中前递（把 load-use 从 2 拍压到 1 拍）
+  //   为什么原来做不到：DCache 的数组读虽然是组合的，但地址取自 **M2** 那一段；
+  //   而 M1 那段（= load 的有效地址 Ex_result_addr_reg）在本拍就能查 —— 给 DCache
+  //   加一个**只读探测口**（m1_addr/m1_en → m1_hit/m1_rdata）之后，命中时数据当拍就有。
+  //   ★ 口径必须与主读口一致：字节/半字仍按 M1 的 funct3 + addr[1:0] 选道再符号扩展
+  //     （与上面 rdata_ex 同一套规则，只是数据源换成 m1_rdata）。
+  //   ★ 只在 `mem_ren_reg & valid_reg & m1_hit` 时成立：store / 空拍 / 未命中 / MMIO
+  //     一律退回原路径（多停 1 拍），所以这条通路**只可能变快，不可能改错语义**。
+  function automatic [31:0] lane_extract(input [31:0] w, input [2:0] f3, input [1:0] off);
+    reg [7:0]  b;
+    reg [15:0] h;
+    begin
+      case (off)
+        2'b00:   b = w[7:0];
+        2'b01:   b = w[15:8];
+        2'b10:   b = w[23:16];
+        default: b = w[31:24];
+      endcase
+      h = off[1] ? w[31:16] : w[15:0];
+      case (f3)
+        3'b000:  lane_extract = {{24{b[7]}}, b};      // lb
+        3'b001:  lane_extract = {{16{h[15]}}, h};     // lh
+        3'b010:  lane_extract = w;                     // lw
+        3'b100:  lane_extract = {24'b0, b};            // lbu
+        3'b101:  lane_extract = {16'b0, h};            // lhu
+        default: lane_extract = 32'b0;
+      endcase
+    end
+  endfunction
+
+  assign LSU_Rdata_m1 = lane_extract(m1_rdata, funct3_reg, Ex_result_addr_reg[1:0]);
+  assign m1_load_ok   = mem_ren_reg & valid_reg & m1_hit;
+
   assign ready_last = ready_next & ~lsu_freeze;   // 与下一行推进条件同式，别只改一处
   assign valid_next = valid_reg;                  // LSU 的 valid 就是 M1 寄存后的 EXU valid
+  // v12（B）：退休脉冲 = 本拍真的把一条有效指令推进到 WB 级（同上式 + valid_reg_pipe）。
+  //   气泡拍 valid_reg_pipe=0 → 不计数；冻结拍被 ~lsu_freeze 挡掉 → 不重复计数。
+  //   一条指令在 WB 入口只可能"落"一次，所以这正是 minstret 要的口径。
+  assign retire_wb = ready_next & ~lsu_freeze & valid_reg_pipe;
 
-  // 外设地址在这里做字对齐，mask/funct3 决定最终按字节、半字还是整字访问。
-  // ★ 这一拍（M2）就是「发总线」的那一拍：DCache 在下一个时钟沿采走 addr/wen/wdata/mask
-  //   （cpu_en = mem_ren_pipe|wen、cpu_wen = wen）；load 的返回数据不在这里取，而是等 DCache
-  //   撤销 hold 之后由 M3 的 rdata_reg2 采走。
-  // mask 是**宽度编码**不是位掩码：funct3[1:0] 的 00/01/10 恰好对应 1/2/4 字节（sb/sh/sw），
-  //   sync_mem/DCache 按 00→1B、01→2B、10→4B 解码（见 board/sync_mem.sv 头部）；store 数据一直放在
-  //   wdata 低位，由下游按 mask+addr[1:0] 落到字节通道。
-  // ★ 反例标注（看着像笔误，但不能照直觉改成 {…[31:2], 2'b00} 字对齐）：这里的 2'b00 落在 bit[17:16]，
-  //   addr[1:0] 被原样保留 —— DCache 的 store2_offset / 字节通道正是靠 cpu_addr[1:0]，一旦被清零，
-  //   所有 sb/sh 都退化成对准字访问。当前 DRAM 只有 64KB（board_top 用 perip_addr[15:2] 索引），
-  //   bit[17:16] 恒为 0，两种写法在现网等价；要动这一句先确认存储映射与 DCache 的偏移来源。
-  assign addr  = {Ex_result_addr_reg_pipe[31:18], 2'b00, Ex_result_addr_reg_pipe[15:0]};
+  /* ★ v14（P4）：请求身份证。每推进一条 M2 指令翻转一次（冻结期间不翻转），
+   *   DCache 把它与 cpu_addr_r 一起寄存，用"寄存后的 seq 变没变"判断换没换请求。
+   *   ★ 这里的推进条件必须与下面 always_ff 的推进条件**逐字一致**
+   *     （`ready_next & ~lsu_freeze`）：只挡一处会让身份证与实际推进脱钩。 */
+  always_ff @(posedge clock) begin
+    if (reset)                        req_seq <= 1'b0;
+    else if (ready_next & ~lsu_freeze) req_seq <= ~req_seq;
+  end
+
+  // ★★ v13 修复（真实功能缺陷，扩到 128KB DRAM 后才暴露）：
+  //   原来是 `{Ex_result_addr_reg_pipe[31:18], 2'b00, [15:0]}` —— 把 **bit[17:16] 强制清零**。
+  //   v12 时代 DRAM 只有 64KB（board_top 用 perip_addr[15:2] 索引），bit[17:16] 恒为 0，
+  //   所以这个"清零"从未生效过；一旦把 DRAM 扩到 128KB、软件把 .rodata/.data 放在
+  //   0x1_0000 以上，**地址的 bit16 会被硬件吃掉**，0x10038 变 0x00038 —— 数据访问
+  //   全部回卷到低 64KB，与栈/全局变量糊在一起。
+  //   现在原样透传：宽度由 mask(funct3[1:0]) 决定，字节通道靠 addr[1:0]，
+  //   DRAM 的容量译码交给顶层（board_top 的 sync_mem 用 addr[$clog2(WORDS)+1:2]）。
+  assign addr  = Ex_result_addr_reg_pipe;
   assign wdata = rs2_value_reg_pipe;
   assign mask  = funct3_reg_pipe[1:0];
   assign wen   = mem_wen_reg_pipe;
 
   // *_next = M1 的直通输出（EXU 刚送进来的那条指令）、*_pipe = M2、*_wb = M3 —— 三级各留一份观察点，
   //   就是为了「结果一可用就前递」：Data_hazard 不必等指令走到写回才拿到值（见 myCPU.sv 的 MEM_* 一组）。
-  //   LSU_Rdata 是**已扩展**的本级读数据，LSU_Rdata_raw 是原始整字（观察/调试用）。
+  //   LSU_Rdata 是**已扩展**的本级（M1）读数据 —— v11（S6）起它真的被用上了：
+  //   作为 DCache 命中时的 M1 前递源（load-use 停顿 2 拍 → 1 拍）。
   assign LSU_Rdata      = rdata_ex;
-  assign LSU_Rdata_raw  = rdata;
   assign funct3_next    = funct3_reg;
   assign Ex_result_next = Ex_result_fwd_reg;
   assign rd_value_next  = rd_value_reg;
@@ -197,7 +276,13 @@ module LSU (
   // M3 的优先级 jump/CSR > load > Ex_result 与 WBU 内部一致 —— 这里先算好给前递用，最终值由 WBU 再选一次。
   logic wb_sel_jmp_csr_pipe;
   assign wb_sel_jmp_csr_pipe = jump_flag_reg_pipe | (|csr_wen_reg_pipe);
-  assign forward_val_pipe = wb_sel_jmp_csr_pipe ? rd_value_reg_pipe : Ex_result_fwd_reg_pipe;
+  // ★ v11（S6）：M2 级如果是 **load**，前递值必须是**读回并已扩展的数据**，不能是 Ex_result
+  //   （那对 load 是有效地址）。数据在 M2 当拍就有效（DCache 命中路径同拍组合；未命中时
+  //   hold 冻结 LSU、解冻那拍同样在 rdata 上），见下方 M2 扩展块的说明。
+  //   优先级仍是 jump/CSR > load > Ex_result；但 load 一定不是 jump/CSR，所以先判 load 等价。
+  assign forward_val_pipe = mem_ren_reg_pipe      ? rdata_ex_pipe          :
+                            wb_sel_jmp_csr_pipe   ? rd_value_reg_pipe     :
+                                                    Ex_result_fwd_reg_pipe;
 
   assign pc_wb          = pc_reg2;
   assign rdata_wb_raw   = rdata_reg2;
@@ -411,6 +496,54 @@ module LSU (
       default: rdata_wb2 = 0;
     endcase
   end
+
+  /* ============================ v11（S6）M2 级扩展 ============================
+   * 与 M1/M3 同构，只是数据源是**当拍**的 rdata、偏移/位宽取 _pipe 那一组。
+   * 选道口径必须与 M1/M3、LSU 的 store 合并、board/sync_mem 的 mask 写完全一致
+   * （字节按 addr[1:0] 取 4 个字节之一、半字按 addr[1] 取低/高半字），否则同一字节
+   * 在三处会错位 —— 见本文件 §LSU-1 与 WBU.sv 的同类说明。
+   * ========================================================================= */
+  always @(*) begin
+    case (Ex_result_addr_reg_pipe[1:0])
+      2'b00:   rdata_byte_sel_pipe = rdata;
+      2'b01:   rdata_byte_sel_pipe = {8'd0,  rdata[31:8]};
+      2'b10:   rdata_byte_sel_pipe = {16'd0, rdata[31:16]};
+      default: rdata_byte_sel_pipe = {24'd0, rdata[31:24]};
+    endcase
+  end
+  assign rdata_half_sel_pipe = Ex_result_addr_reg_pipe[1] ? {16'd0, rdata[31:16]} : rdata;
+
+  assign rdata_8u_pipe  = {24'd0, rdata_byte_sel_pipe[7:0]};
+  assign rdata_16u_pipe = {16'd0, rdata_half_sel_pipe[15:0]};
+
+  /* verilator lint_off PINMISSING */
+  sext #(
+      .DATA_WIDTH(8),
+      .OUT_WIDTH (32)
+  ) sext_i8_pipe (
+      .data     (rdata_byte_sel_pipe[7:0]),
+      .sext_data(rdata_8i_pipe)
+  );
+
+  sext #(
+      .DATA_WIDTH(16),
+      .OUT_WIDTH (32)
+  ) sext_i16_pipe (
+      .data     (rdata_half_sel_pipe[15:0]),
+      .sext_data(rdata_16i_pipe)
+  );
+
+  always @(*) begin
+    case (funct3_reg_pipe)
+      3'b000:  rdata_ex_pipe = rdata_8i_pipe;
+      3'b001:  rdata_ex_pipe = rdata_16i_pipe;
+      3'b010:  rdata_ex_pipe = rdata;
+      3'b100:  rdata_ex_pipe = rdata_8u_pipe;
+      3'b101:  rdata_ex_pipe = rdata_16u_pipe;
+      default: rdata_ex_pipe = 0;
+    endcase
+  end
+
 
 
 endmodule  //MEM

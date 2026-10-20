@@ -27,7 +27,14 @@ module RegisterFile #(ADDR_WIDTH = 32, DATA_WIDTH = 5) (
         if (reset) begin
             for (i = 0; i < 2**ADDR_WIDTH; i = i + 1)
                 rf[i] <= {DATA_WIDTH{1'b0}};
-        end else if (wen) begin
+        end else if (wen && (waddr != {ADDR_WIDTH{1'b0}})) begin
+            // ★ 不变量：x0 是**硬连线零**，写它等于没写 —— 这里在寄存器堆内部兜底。
+            //   v12（B）加这道门之前，唯一的保护在 Reg_Stack.sv 的写数据侧
+            //   （`rd==0` 时把 wdata 钳成 0），也就是说"写 x0 会真的写进 rf[0]，
+            //   只是写的是 0"。那种做法依赖"所有写数据都要经过那个钳位"，一旦将来加
+            //   调试写口 / 新增旁路就会静默破掉 x0（实测 `jal x0` 与 `ecall` 的
+            //   writeback 都带着 ena=1、reg=x0）。加这道门后两处互不依赖。
+            //   注：写使能仍按原样上报（debug_wb_ena = WBU_R_wen），不受影响。
             rf[waddr] <= wdata;
         end
     end

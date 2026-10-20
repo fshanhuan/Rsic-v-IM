@@ -179,7 +179,7 @@ module tb_iverilog #(
     // ---------------------------------------------------------------------
     wire [31:0] p_if_pc      = u_cpu.IFU_pc;
     wire [31:0] p_if_inst    = u_cpu.IFU_inst;
-    wire        p_if_deliver = u_cpu.IFU_Inst0.advance_en;   // IF 交付有效：= valid & ready & fetch_align，每指令 1 拍
+    wire        p_if_deliver = u_cpu.IFU_Inst0.advance_en;   // IF 交付有效：= 队头 valid & ready（v10 起前端 1 条/拍，不再是 3 拍）
     wire [31:0] p_id_pc      = u_cpu.IDU_pc;
     wire        p_id_valid   = u_cpu.IDU_valid;             // ID2 的 valid（= valid_d 直通）
     wire        p_id1_valid  = u_cpu.IDU_Inst0.valid;       // ID1 的 valid（第一级流水寄存）
@@ -241,6 +241,10 @@ module tb_iverilog #(
     integer store_events  = 0;
     integer load_events   = 0;
     integer stall_cycles  = 0;
+    // v10 前端 / IROM 门控的实测统计（每拍采样）
+    integer irom_en_cycles = 0;      // IROM 读使能为 1 的拍数（= 真取指次数）
+    integer ifu_deliver_cycles = 0;  // 前端真正交付一条指令的拍数
+    integer ifu_qmax = 0;            // 取指队列达到过的最大深度
     integer redirect_cnt  = 0;
     integer ecall_cycle   = -1;
     integer drain_cnt     = 0;
@@ -298,6 +302,7 @@ module tb_iverilog #(
     integer      snap_bp_pred, snap_bp_hit, snap_bp_miss;
     integer      snap_wb_events, snap_wb_suppressed, snap_store_events, snap_load_events;
     integer      snap_stall_cycles, snap_redirect_cnt, snap_cycle;
+    integer      snap_irom_en, snap_ifu_deliver, snap_qmax;
     integer      snap_done = 0;
 
     // 上一拍事件（用于“同一事件连续保持多拍”去重）
@@ -319,8 +324,9 @@ module tb_iverilog #(
     // ① write-once：同步 DRAM 下，一次 store 的 perip_wen 必须是**单拍脉冲**。
     //    DCache 里 store 请求被寄存成 store_req_r 单拍脉冲；若哪天有人把它改回
     //    “组合透传 mem_wen”，流水线冻结（load miss / IFU hold）期间就会重复
-    //    发写，一次 store 写两次。这里连续两拍同地址同 perip_wen 即判失败，
+    //    发写，一次 store 写两次。这里连续两拍「同地址 + 同数据 + 同掩码」即判失败，
     //    并且把重复写次数累加进 store_repeat，最终报告里必须为 0。
+    //    （v10.1：只比地址会把 `sh` 紧跟 `sb` 写同一个字误判成重复写，必须带上数据与掩码。）
     //
     // ② fetch 契约：IFU 交付指令时（valid=1），ICache 必须取到**当前 pc** 的
     //    指令。实现方式是在 negedge 采样 IFU_pc/IFU_inst，若 pc 连续两拍相同
@@ -329,6 +335,8 @@ module tb_iverilog #(
     // ---------------------------------------------------------------------
     logic [31:0] prev_store_addr = 32'b0;
     logic        prev_store_wen  = 1'b0;
+    logic [31:0] prev_store_wdata = 32'b0;
+    logic [ 1:0] prev_store_mask  = 2'b0;
 
     logic [31:0] prev_fetch_pc   = 32'hFFFF_FFFF;
     logic [31:0] prev_fetch_inst = 32'b0;
@@ -539,8 +547,9 @@ module tb_iverilog #(
             snap_mtvec    = p_mtvec;
             snap_dram1000 = dram[16'h1000 >> 2];
 
-            snap_icache_hit    = u_cpu.icache_hit_cnt;
-            snap_icache_miss   = u_cpu.icache_miss_cnt;
+            // v11（S1）：ICache 已旁路，这两个计数器由 myCPU 内部恒驱 0（端口仍在，见 myCPU.sv）。
+            snap_icache_hit    = u_cpu.debug_icache_hit_cnt;
+            snap_icache_miss   = u_cpu.debug_icache_miss_cnt;
             snap_dcache_hit    = u_cpu.dcache_hit_cnt;
             snap_dcache_miss   = u_cpu.dcache_miss_cnt;
             snap_bp_pred       = u_cpu.bp_pred_cnt;
@@ -552,6 +561,9 @@ module tb_iverilog #(
             snap_store_events  = store_events;
             snap_load_events   = load_events;
             snap_stall_cycles  = stall_cycles;
+            snap_irom_en       = irom_en_cycles;
+            snap_ifu_deliver   = ifu_deliver_cycles;
+            snap_qmax          = ifu_qmax;
             snap_redirect_cnt  = redirect_cnt;
             snap_cycle         = cycle;
             snap_done          = 1;
@@ -578,6 +590,13 @@ module tb_iverilog #(
             $display("  store accesses      = %0d", snap_store_events);
             $display("  load  accesses      = %0d", snap_load_events);
             $display("  IFU_stall cycles    = %0d", snap_stall_cycles);
+            $display("  IROM irom_en cycles = %0d / %0d  (%0d%%)   <- v10 读使能门控",
+                     snap_irom_en, snap_cycle,
+                     (snap_cycle == 0) ? 0 : (snap_irom_en * 100 / snap_cycle));
+            $display("  IFU delivered       = %0d / %0d  (%0d%%)   <- 1 条/拍上限",
+                     snap_ifu_deliver, snap_cycle,
+                     (snap_cycle == 0) ? 0 : (snap_ifu_deliver * 100 / snap_cycle));
+            $display("  IFU queue max depth = %0d (QDEPTH=4)", snap_qmax);
             $display("  redirects (dnpc)    = %0d", snap_redirect_cnt);
             if (ecall_cycle >= 0)
                 $display("  ecall decoded at cyc= %0d  (snapshot at +%0d, PC window +%0d)",
@@ -622,7 +641,7 @@ module tb_iverilog #(
                     $display("  dram[0x1000] check  [FAIL]  exp=0x%h", exp_dram);
                 end
             end
-            $display("  ICache: hit=%0d miss=%0d", snap_icache_hit, snap_icache_miss);
+            $display("  ICache(bypassed): hit=%0d miss=%0d", snap_icache_hit, snap_icache_miss);
             $display("  DCache: hit=%0d miss=%0d", snap_dcache_hit, snap_dcache_miss);
             $display("  BPU   : pred=%0d hit=%0d miss=%0d", snap_bp_pred, snap_bp_hit, snap_bp_miss);
 
@@ -711,7 +730,7 @@ module tb_iverilog #(
 
         // -----------------------------------------------------------------
         // 【重要】myCPU.sv:537 例化 WBU_inst0 时漏接了 `.stall`：
-        //   Verilator 会把未连接的 input 默认接 0（所以 cdp-tests 能过），
+        // - Verilator 会把未连接的 input 默认接 0（所以 cdp-tests 能过），
         //   iverilog 则让它保持 z → WBU 里 `if (!stall)` 变成 x → 寄存器
         //   永远不更新 → 一条写回都出不来（现象：rf 全是 x、debug_wb 恒 0）。
         //   iverilog -Wall 会直接报：
@@ -719,17 +738,24 @@ module tb_iverilog #(
         //                   input port 14 (stall) floating.
         //   不改 RTL，用层次化 force 把这根线钉到 0（+no_wbu_force 可关闭）。
         // -----------------------------------------------------------------
+        //   v10.1 补：RTL 已把 `.stall(1'b0)` 硬接（myCPU.sv:807），force 成了冗余；
+        //   而 Verilator 静态检查直接拒绝「对 input 端口 force」(ASSIGNIN)，
+        //   所以这一段在 Verilator 下整体跳过 —— 语义等价（都是常数 0）。
+`ifdef VERILATOR
+        $display("[TB] note: Verilator build, skip force (RTL hardwires .stall(1'b0))");
+`else
         if (!$test$plusargs("no_wbu_force")) begin
             force u_cpu.WBU_inst0.stall = 1'b0;
             $display("[TB] workaround: force u_cpu.WBU_inst0.stall = 1'b0  (myCPU.sv:537 leaves .stall open)");
         end
+`endif
 
         // -----------------------------------------------------------------
         // 【重要】RegisterFile.sv:20-22 的寄存器堆没有复位：
         //       always_ff @(posedge clock) if (wen) rf[waddr] <= wdata;
         //   4 态仿真下 rf[0]（即 x0）一直是 x，于是任何以 x0 为源操作数的
         //   指令（addi x2,x0,5 …）都会算出 x，整条数据通路全被 x 污染。
-        //   Verilator 是 2 态（未初始化 = 0）、FPGA 上 BRAM 上电也是 0，
+        // - Verilator 是 2 态（未初始化 = 0）、FPGA 上 BRAM 上电也是 0，
         //   所以 cdp-tests / 上板都看不到这个问题。
         //   不改 RTL：在 0 时刻把寄存器堆按“上电初值 0”清一遍（+raw_rf 关闭）。
         // -----------------------------------------------------------------
@@ -777,9 +803,16 @@ module tb_iverilog #(
         // prog.hex 的 sw 目标字（0x1000 -> word 1024）也显式导出，方便看写内存
         $dumpvars(0, dram[1024]);
 
-        // 复位：高电平有效，保持 8 拍后释放
+        // 复位：高电平有效，保持 8 拍后释放。
+        //   ★ 必须在 **negedge** 释放，不能紧跟在 @(posedge clk) 后面用阻塞赋值：
+        //     那等于“在时钟沿那一瞬把 rst 拉低”，与各模块 always_ff 的采样处于
+        //     同一仿真时刻 → 复位是否被 FF 看见取决于进程调度顺序（LRM 不保证）。
+        //     实测：iverilog 12.0 的 FF 在那一拍仍看到 rst=1，Verilator 5.020 看到
+        //     rst=0，于是整条流水线整体差 1 拍（WB 首事件 cyc=10 vs cyc=9），
+        //     而所有功能结果一致 —— 典型复位竞争。放到 negedge 后两套仿真器逐拍一致。
         rst = 1'b1;
         repeat (8) @(posedge clk);
+        @(negedge clk);
         rst = 1'b0;
         $display("[TB] reset released at cycle boundary, start running...");
     end
@@ -793,6 +826,11 @@ module tb_iverilog #(
             cycle = cycle + 1;
 
             if (u_cpu.IFU_stall) stall_cycles = stall_cycles + 1;
+            // v10：IROM 读使能门控的实测口径 —— cpu_req 为 1 的拍才真的读 BRAM。
+            //   改造前 mem_en 上电后恒为 1，这个比值应该接近 100%。
+            if (u_cpu.icache_mem_en) irom_en_cycles = irom_en_cycles + 1;
+            if (u_cpu.IFU_Inst0.advance_en) ifu_deliver_cycles = ifu_deliver_cycles + 1;
+            if (u_cpu.IFU_Inst0.q_cnt > ifu_qmax) ifu_qmax = u_cpu.IFU_Inst0.q_cnt;
 
             // ---- 写回事件：同一事件连续保持多拍时只打印一次 ----
             if (dbg_have_inst) begin
@@ -819,15 +857,22 @@ module tb_iverilog #(
             if (perip_wen) begin
                 store_events = store_events + 1;
                 $display("[ST ] cyc=%0d addr=%h mask=%b wdata=%h", cycle, perip_addr, perip_mask, perip_wdata);
-                // 断言①：perip_wen 必须是单拍脉冲，不得连续两拍对同一地址拉高
-                if (prev_store_wen && (perip_addr === prev_store_addr)) begin
+                // 断言①：perip_wen 必须是单拍脉冲，不得连续两拍把**同一笔写**发两次。
+                //   ★ 不能只看地址：`sh x6,0(x2)` 紧跟 `sb x7,2(x2)` 是两条不同的 store，
+                //     地址（同一个字）相同但数据/掩码不同，属于正常行为（v10.1 用随机
+                //     差分测出来的误判 —— 当时地址相同即报错，把合法程序判成失败）。
+                //     真正的重复写是「地址 + 数据 + 掩码」全都一样。
+                if (prev_store_wen && (perip_addr === prev_store_addr)
+                    && (perip_wdata === prev_store_wdata) && (perip_mask === prev_store_mask)) begin
                     store_repeat = store_repeat + 1;
-                    $display("[CHK] cyc=%0d FAIL write-once: perip_wen held 2+ cycles at addr=%h",
-                             cycle, perip_addr);
+                    $display("[CHK] cyc=%0d FAIL write-once: perip_wen held 2+ cycles at addr=%h data=%h mask=%b",
+                             cycle, perip_addr, perip_wdata, perip_mask);
                 end
             end
-            prev_store_wen  = perip_wen;
-            prev_store_addr = perip_addr;
+            prev_store_wen   = perip_wen;
+            prev_store_addr  = perip_addr;
+            prev_store_wdata = perip_wdata;
+            prev_store_mask  = perip_mask;
 
             // 断言②：同一 PC 上重复交付的指令必须一致（缓存不得交付别的地址的数据）
             if (u_cpu.IFU_valid) begin
@@ -899,5 +944,21 @@ module tb_iverilog #(
             end
         end
     end
+
+`ifdef RAS_DBG
+    // 临时探针：确认 call/ret 分类与 bp_update_en 的**相位**（见 v11 S4）
+    always @(posedge clk) begin
+        if (u_cpu.bp_update_en)
+            $display("[RAS] cyc=%0d pc=%h idu_inst=%h call=%b ret=%b sp=%0d taken=%b",
+                     cycle, u_cpu.EXU_pc, u_cpu.IDU_inst_d,
+                     u_cpu.bp_is_call, u_cpu.bp_is_ret, u_cpu.BPU_inst.ras_sp,
+                     u_cpu.bp_update_taken);
+        if (u_cpu.IFU_fetch_pc == 32'h54)
+            $display("[PRED] cyc=%0d tgt=%h taken=%b is_ret=%b kind=%b sp=%0d top=%h",
+                     cycle, u_cpu.bp_pred_target, u_cpu.bp_pred_taken,
+                     u_cpu.BPU_inst.pred_is_ret, u_cpu.BPU_inst.btb_kind[6'h15],
+                     u_cpu.BPU_inst.ras_sp, u_cpu.BPU_inst.ras_top);
+    end
+`endif
 
 endmodule

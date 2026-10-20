@@ -2,37 +2,40 @@
 `timescale 1ns / 1ps
 
 /* =============================================================================
- * ICache.sv — 直接映射指令缓存（同步 BRAM：请求拍 + 响应拍）
+ * ICache.sv — 直接映射指令缓存（**全流水、每拍一次取指、未命中零停顿**）
  * -----------------------------------------------------------------------------
- * 上游 IFU 的取指地址 pc；下游 IFU 的 irom_data（= EXU 的 inst）。存储器侧接
- * SoC 同步 IROM：用 mem_addr/mem_en 发起读，**下一拍**才从 mem_rdata 拿回数据。
+ * 上游 IFU 的取指地址 pc；下游 IFU 的 irom_data。存储器侧接 SoC 同步 IROM：
+ * 本拍给 mem_addr/mem_en，**下一拍**mem_rdata 就有效（1 级延迟，不是 2 级）。
  *
- * ★ 接口契约（改之前必读）：
- *   - fetch_align：本拍 mem_rdata 是否**属于当前 cpu_addr 这条请求**。
- *   - hold：本拍无法完成访问（未对齐或未命中），前端要停一拍后重试。
- *     IFU 的 inst_valid = fetch_align、mem_stall = hold —— 全设计的核心握手之一。
- *   - cpu_rdata：命中取缓存，未对齐 / 未命中一律给 `NOP`，绝不把未就绪或
- *     别的地址的数据当指令；hit / miss 只有 fetch_align=1 时才有意义。
- *   - 一次取指横跨两拍、请求与响应交替：请求拍把 cpu_addr 寄存给 BRAM
- *     （mem_addr = cpu_addr_r），响应拍才拿到 mem_rdata；正因如此每拍都在
- *     “发新请求”与“判上一个响应”之间交替，判定必须跟 mem_rdata 落在同一拍。
- *   - 组织：行大小 1 个 32 位字（只有 index/tag、没有 offset），**不需要突发**，
- *     miss 的语义就是“废掉一拍再重试”；miss 代价固定 +1 拍（PC 被停住，重试拍
- *     必然命中，永不重复）。
+ * ★ v10 改造（前端解耦）——原来这里有个致命的取指节拍限制，务必读完再改：
+ *   旧实现的地址是**再寄存一拍**的（mem_addr = cpu_addr_r），然后用
+ *   `addr_same_r = (cpu_addr == cpu_addr_r)` 去判"返回结果属不属于当前请求"。
+ *   这就把"每拍都能取指"退化成"PC 必须连续稳定 2 拍才敢交付一条"：
+ *       PC 变 → 第 1 拍不等（hold）→ 第 2 拍才交付 → 于是**每 3 拍才能出一条指令**。
+ *   实测（`_fw/` 前端专项）：delivered=132 / cyc_window=396 = 0.33 IPC 上限，
+ *   prog_loop 里 110/288 拍耗在 icache_hold 上 —— 前端就是整机的瓶颈。
+ *   根因不是命中率，而是"地址寄存一拍 + 拿当拍 PC 去对账"这个结构。
  *
- * ★ 不变量：喂 BRAM 的地址与做判定的 index/tag 必须**同沿、同源**（都取自同一个
- *   cpu_addr），判定也不许改挂到当拍 cpu_addr 上 —— 当拍 cpu_addr 已是下一条请求，
- *   它的数据还在 BRAM 里；错开后两者差一拍，每条新指令都被误判成 miss（前端变成
- *   3 拍走一条）。踩坑史（旧“同拍组合旁路”为什么上板必炸）：见 §ICACHE-1
- * ★ 不变量：新地址出现的第一拍必须报 fetch_align=0 并拉高 hold，从而维持
- *   「cpu_addr 稳定 ⇒ 返回结果属于当前 pc」；否则 PC 会跑在取指数据前面，
- *   IDU 收到「下一条地址 + 上一条指令」，还会拿别的地址的数据填行（污染→假命中）。
- * ★ 不变量：缓存行只在 fetch_align=1 时写（命中只计数）；未对齐那拍的 mem_rdata
- *   不属于当前请求，写进去就是别的地址的数据。
+ * ★ 新契约（改前必读）：
+ *   - **mem_addr = cpu_addr（组合直通 BRAM）**，mem_en = cpu_req。同步 BRAM 在
+ *     cpu_req 那一拍采地址，下一拍 mem_rdata 就是 mem[cpu_addr(T)]。地址来自 IFU
+ *     的 PC 寄存器，本来就有一整拍余量，不需要再打一拍。
+ *   - cpu_req 可以**每拍为 1**：一次取指只占 1 拍，稳态吞吐 1 条/拍。
+ *   - resp_valid(T+1) = cpu_req(T)：本拍 cpu_rdata 有效。IFU 只在这拍采数据。
+ *   - **未命中不停顿**：miss 那拍直接把 mem_rdata **旁路**出去（数据此刻就在手上），
+ *     同一沿把行填好。所以 miss 对时序的代价是 **0 拍**，缓存只影响功耗与计数器。
+ *     （旧的 hold/miss 重试机制整体删除 —— 它正是 3 拍节拍的来源。）
+ *   - clr（fence.i）= 全部行 valid 清零；在途请求由 IFU 侧 flush 一起丢弃。
+ *   - mem_en 只在 cpu_req 那拍为 1：IROM 的 ren 因此**不再恒为 1**，空转拍不读
+ *     BRAM（省动态功耗），也顺手修好 hit_cnt/miss_cnt 的重复计数。
  *
- * 计数器语义：
- *   hit_cnt  : fetch_align=1 且命中 = 一次
- *   miss_cnt : fetch_align=1 且未命中 = 一次（hold 持续多拍不会重复计数）
+ * ★ 不变量：喂 BRAM 的地址与"跟着响应走的 index/tag 快照"必须**同一沿、同源**。
+ *   新实现把它做在硬件结构里：cpu_req 那拍，BRAM 采 cpu_addr、idx_r/tag_r 采
+ *   同一条 cpu_addr 的切片，下一拍两者描述的必然是同一条请求 —— 不再有
+ *   "拿当拍 PC 去对账"这回事，也就不可能错相。
+ *
+ * 计数器语义（v10 修正）：每**一次请求**恰好记一次，hit/miss 之和 = 取指数。
+ *   旧实现在 PC 被冻结的多拍里 `fetch_align` 可能反复为 1，把同一次取指重复计数。
  * =========================================================================== */
 module ICache #(
     parameter INDEX_BITS = `ICACHE_INDEX_BITS,
@@ -40,113 +43,90 @@ module ICache #(
 ) (
     input  logic        clk,
     input  logic        reset,
+    // 取指请求侧（来自 IFU）：cpu_addr 是**当拍**要取的地址，组合直通 BRAM
     input  logic [31:0] cpu_addr,
+    input  logic        cpu_req,
+    input  logic        clr,          // fence.i：清全部 valid 位
+    // 存储器侧
     input  logic [31:0] mem_rdata,
 
     output logic [31:0] cpu_rdata,
     output logic [31:0] mem_addr,
     output logic        mem_en,
-    output logic        fetch_align,
+    // 响应侧（与 mem_rdata 同拍）
+    output logic        resp_valid,
     output logic        hit,
     output logic        miss,
-    output logic        hold,
     output logic [31:0] hit_cnt,
     output logic [31:0] miss_cnt
 );
 
     localparam LINES = 1 << INDEX_BITS;   // 行数 = 1 << INDEX_BITS（默认 6 → 64 行）
 
-    // tag/data 综合成隐含 RAM（读组合：valid/tag/data 三路同拍做比较；写同步）。
+    // tag/data 综合成隐含 RAM（读组合：valid/tag/data 三路同拍比较；写同步）。
     logic                 valid [0:LINES-1];
     logic [TAG_BITS-1:0]  tag   [0:LINES-1];
     logic [31:0]          data  [0:LINES-1];
 
-    // 组合地址侧：只用于生成“本拍要寄存的 index/tag”，与 cpu_addr_r 同沿寄存。
-    //   位选：低 2 位是字内字节偏移（行大小 1 个字，用不到），所以 index 从 bit2 起，
-    //   tag 是剩下的高位 —— 必须与 para.sv 的 TAG_BITS = 32-INDEX_BITS-2 对齐。
+    // 组合切片：只用于在 cpu_req 那拍随地址一起寄存快照。位选与 para.sv 的
+    //   TAG_BITS = 32-INDEX_BITS-2 严格对齐（低 2 位是字内字节偏移，行大小 1 字用不到）。
     logic [INDEX_BITS-1:0] index;
     logic [TAG_BITS-1:0]   tag_in;
     assign index  = cpu_addr[INDEX_BITS+1:2];
     assign tag_in = cpu_addr[31:INDEX_BITS+2];
 
-    /* ---------------- 请求侧寄存器（喂 BRAM） ---------------- */
-    // cpu_addr_r 给 BRAM；cpu_index_r/cpu_tag_r 是**同一条请求**的快照，留给判定侧。
-    logic [31:0]           cpu_addr_r;
-    logic                  cpu_en_r;
-    logic [INDEX_BITS-1:0] cpu_index_r;
-    logic [TAG_BITS-1:0]   cpu_tag_r;
+    /* ---------------- 请求侧：地址**不进寄存器**，直接给 BRAM ---------------- */
+    assign mem_addr = cpu_addr;
+    assign mem_en   = cpu_req;          // ← IROM 读使能门控：只在真发请求那拍为 1
 
-    assign mem_addr = cpu_addr_r;
-    assign mem_en   = cpu_en_r;
+    /* ---------------- 响应侧：与 mem_rdata 同一沿对齐的 index/tag 快照 ---------------- */
+    logic [INDEX_BITS-1:0] idx_r;
+    logic [TAG_BITS-1:0]   tag_r;
 
-    /* ---------------- 判定侧寄存器（与 mem_rdata 同拍对齐） ---------------- */
-    logic [INDEX_BITS-1:0] align_index_r;
-    logic [TAG_BITS-1:0]   align_tag_r;
-    // ★ 不变量：命中/回填还要看 resp_valid_r（= 返回侧已装载过一条真实请求），
-    //   不能只看 addr_same_r。原因：reset / 第一个请求拍，align_*_r 还是复位值而
-    //   mem_rdata 是复位前的垃圾，不加限定就会把垃圾写进缓存行、之后 valid=1 假命中，
-    //   整机从这个错误指令开始跑（实测踩到过）。
-    logic                  resp_valid_r;
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            idx_r      <= {INDEX_BITS{1'b0}};
+            tag_r      <= {TAG_BITS{1'b0}};
+            resp_valid <= 1'b0;
+        end else begin
+            // ★ 不变量：这一拍 BRAM 采的地址就是 cpu_addr，所以快照必须同沿采同一条
+            //   cpu_addr 的切片 —— 两者要么一起更新、要么一起不更新。
+            idx_r      <= index;
+            tag_r      <= tag_in;
+            resp_valid <= cpu_req;      // 1 级延迟，与 mem_rdata 严格同拍
+        end
+    end
 
-    // 地址是否已稳定到“当前这条请求”：新地址出现的第一拍，BRAM 返回的还是旧地址的
-    // 结果，这一拍必须报未对齐。cpu_en_r=0（复位后首拍）也算不稳定。
-    logic addr_same_r;
-    assign addr_same_r = (cpu_addr == cpu_addr_r) & cpu_en_r;
+    // 命中比较三路与：①属于本拍响应 ②该行有效 ③tag 相等。
+    assign hit  = resp_valid && valid[idx_r] && (tag[idx_r] == tag_r);
+    assign miss = resp_valid && ~hit;
 
-    // 只有“返回侧已装载”且“地址稳定”时，align_*_r 与 mem_rdata 才是同一条请求。
-    assign fetch_align = resp_valid_r & addr_same_r;
+    // ★ 不变量：未命中必须是**旁路**（把本拍 mem_rdata 直接给出去），而不是停拍重试 ——
+    //   数据这一拍已经在手上，停一拍纯属浪费。resp_valid=0 时给 `NOP，绝不把上次残留的
+    //   mem_rdata（sync_mem 在 ren=0 时保持旧值）当指令。
+    assign cpu_rdata = resp_valid ? (hit ? data[idx_r] : mem_rdata) : `NOP;
 
-    // 命中比较三路与：①属于当前请求 ②该行有效 ③tag 相等。
-    assign hit  = fetch_align && valid[align_index_r] && (tag[align_index_r] == align_tag_r);
-    assign miss = fetch_align && ~hit;
-
-    // 未对齐或未命中时给前端灌 `NOP，绝不把未就绪/别的地址的数据当指令。
-    assign cpu_rdata = hit ? data[align_index_r] : `NOP;
-
-    // 未对齐（结果还没回来）或未命中，都需要停一拍。
-    assign hold = ~fetch_align | miss;
-
-    /* ---------------- 顺序与写回 ---------------- */
+    /* ---------------- 行填充（只在 miss 那拍写一次）与计数器 ---------------- */
     integer i;
     always_ff @(posedge clk) begin
         if (reset) begin
             for (i = 0; i < LINES; i = i + 1)
                 valid[i] <= 1'b0;
-            cpu_addr_r    <= 32'b0;
-            cpu_en_r      <= 1'b0;
-            cpu_index_r   <= {INDEX_BITS{1'b0}};
-            cpu_tag_r     <= {TAG_BITS{1'b0}};
-            align_index_r <= {INDEX_BITS{1'b0}};
-            align_tag_r   <= {TAG_BITS{1'b0}};
-            resp_valid_r  <= 1'b0;
-            hit_cnt       <= 32'b0;
-            miss_cnt      <= 32'b0;
+            hit_cnt  <= 32'b0;
+            miss_cnt <= 32'b0;
         end else begin
-            // ---- ① 请求侧：cpu_addr_r 与 cpu_index_r/cpu_tag_r 在同一沿、
-            //         从同一个 cpu_addr 采样，三者严格描述同一条请求 ----
-            cpu_addr_r  <= cpu_addr;
-            cpu_index_r <= index;
-            cpu_tag_r   <= tag_in;
-            cpu_en_r    <= 1'b1;
-
-            // ---- ② 判定侧：把上一条请求的 index/tag 再寄存一拍，
-            //         与同一条请求的 mem_rdata 对齐 ----
-            align_index_r <= cpu_index_r;
-            align_tag_r   <= cpu_tag_r;
-            resp_valid_r  <= cpu_en_r;
-
-            // ---- ③ 判定与回填：只在结果确实属于当前请求时才动缓存（miss 时回填
-            //         整行；命中只计数），这样新地址带来的废拍不会污染缓存行 ----
-            if (fetch_align) begin
-                if (hit) begin
-                    hit_cnt <= hit_cnt + 32'd1;
-                end else begin
-                    miss_cnt             <= miss_cnt + 32'd1;
-                    valid[align_index_r] <= 1'b1;
-                    tag[align_index_r]   <= align_tag_r;
-                    data[align_index_r]  <= mem_rdata;
-                end
+            if (clr) begin
+                for (i = 0; i < LINES; i = i + 1)
+                    valid[i] <= 1'b0;
+            end else if (miss) begin
+                valid[idx_r] <= 1'b1;
+                tag[idx_r]   <= tag_r;
+                data[idx_r]  <= mem_rdata;
             end
+
+            // 每次取指恰好记一次：hit + miss = 请求数
+            if (hit)  hit_cnt  <= hit_cnt  + 32'd1;
+            if (miss) miss_cnt <= miss_cnt + 32'd1;
         end
     end
 

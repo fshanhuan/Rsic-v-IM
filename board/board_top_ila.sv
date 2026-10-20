@@ -31,7 +31,9 @@ module board_top_ila #(
     // DRAM 字数（16384 字 = 64KB）
     parameter DRAM_WORDS = 16384,
     // 程序镜像（hex 文本，$readmemh 载入 IROM；Vivado 会把它变成 BRAM 初值）
-    parameter IROM_INIT  = "prog.hex"
+    parameter IROM_INIT  = "prog.hex",
+    // ★ v12（A）串口引导开关，透传给 board_top（默认 0 = v11 只读 IROM 行为不变）
+    parameter IROM_BOOT  = 0
 ) (
     // 板载 100MHz 时钟（M19 / FPGA_CLK0）
     input  logic sys_clk,
@@ -75,6 +77,20 @@ module board_top_ila #(
     output logic        debug_dnpc_flag,
     output logic        debug_ready,
     output logic [31:0] debug_ifu_pc,
+
+    // v12（B）：停顿状态字（低 8 位来自 myCPU、8~10 位来自串口引导）+ mcycle 低 32 位
+    output logic [31:0] debug_status,
+    output logic [31:0] debug_mcycle,
+
+    // v12（A）：串口引导（IROM_BOOT=1 时有效；=0 时这些口恒 0 / 不使用）
+    input  logic        uart_rx,
+    // v12（B）：串口发送（console），恒有效
+    output logic        uart_tx,
+    // v12（C）：GPIO，LED1~LED7
+    output logic [6:0]  led,
+    output logic        debug_boot_busy,
+    output logic        debug_boot_ok,
+    output logic        debug_boot_err,
 
     // 唯一的一根"假"输出，不接任何东西（或接一个 LED 当心跳灯）。
     // ★ 不变量：debug_dead **必须存在**，且必须把全部调试量或（OR）进来。
@@ -156,7 +172,8 @@ module board_top_ila #(
     board_top #(
         .IROM_WORDS (IROM_WORDS),
         .DRAM_WORDS (DRAM_WORDS),
-        .IROM_INIT  (IROM_INIT)
+        .IROM_INIT  (IROM_INIT),
+        .IROM_BOOT  (IROM_BOOT)
     ) u_board_top (
         .sys_clk               (sys_clk_50m),
         .btn_rst_n             (rst_n),
@@ -180,7 +197,21 @@ module board_top_ila #(
         // v9 + ILA（B9）：重定向诊断三根线
         .debug_dnpc_flag       (debug_dnpc_flag),
         .debug_ready           (debug_ready),
-        .debug_ifu_pc          (debug_ifu_pc)
+        .debug_ifu_pc          (debug_ifu_pc),
+
+        // v12（B）：停顿状态字 + 拍计数器
+        .debug_status          (debug_status),
+        .debug_mcycle          (debug_mcycle),
+
+        // v12（A）：串口引导
+        .uart_rx               (uart_rx),
+        // v12（B）：串口发送
+        .uart_tx               (uart_tx),
+        // v12（C）：GPIO
+        .led                   (led),
+        .debug_boot_busy       (debug_boot_busy),
+        .debug_boot_ok         (debug_boot_ok),
+        .debug_boot_err        (debug_boot_err)
     );
 
     /* ---------------- 4) 调试量汇总 → 唯一输出（心跳 + 防优化双保险） -------- */
@@ -194,6 +225,14 @@ module board_top_ila #(
                           debug_trap_take,
                           // v9 新增（B9）：重定向诊断三根线也并进心跳 OR，
                           //   保证它们都有真实负载（否则综合会把没负载的网删掉）
-                          debug_dnpc_flag, debug_ready, debug_ifu_pc};
+                          debug_dnpc_flag, debug_ready, debug_ifu_pc,
+                          // v12（B）：状态字与拍计数器也必须并进来 —— debug_status 的低 8 位
+                          //   在 board_top 里是由 myCPU 驱动的"纯观察"信号，顶层没负载会被删掉
+                          debug_status, debug_mcycle,
+                          // v12（B）：uart_tx 本身是引脚输出，已有真实负载，不必并进来
+                          debug_boot_busy, debug_boot_ok, debug_boot_err};
+    // v12（C）：led 是引脚输出（7 根真引脚），本身就有真实负载，**不需要**并进来 ——
+    //   硬塞一个 7'b0 只会变成一句死代码。并进 debug_dead 的唯一理由是"顶层没有负载
+    //   的信号会被综合删掉"，有引脚就不存在这个问题。
 
 endmodule

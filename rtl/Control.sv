@@ -11,11 +11,14 @@
 
 module Control #(
     // C4 总开关：1=非法指令/访存非对齐/指令地址非对齐陷入 mtvec 并登记 CSR；0=退回修复前的
-    // 控制流（IDU 的"非法指令副作用清零"仍生效）。★ 不变量：必须留这个开关且默认 0。原因：
-    // 新异常会改变"哪些指令重定向 PC"，牵动 EXU↔Control 那条很绕的组合链；留开关才能逐项
-    // 开启、逐项回归，也能整块关掉量化资源/Fmax 代价。当前 TRAP_ENABLE=1 时 prog_loop 仍复现
-    // B4 症状，故交付默认关。实测：syn/修复史_全量.md §CONTROL-16
-    parameter TRAP_ENABLE = 0
+    // 控制流（IDU 的"非法指令副作用清零"仍生效）。
+    // ★ v10 变更：默认值由 0 改为 **1**（异常体系补全）。原来默认关掉的原因是
+    //   "TRAP_ENABLE=1 时 prog_loop 仍复现 B4 症状"，而 B4 的真正根因是前端把误预测的
+    //   重定向脉冲吞在 icache_hold 里（PC 冻结期间 ready=0）。v10 把 I-Cache 改成
+    //   全流水、未命中零停顿之后，这条吞脉冲的路径整体消失，7 个整机程序 + 3 个异常
+    //   专项程序在 TRAP_ENABLE=1 下全部通过（证据见 docs/IMPLEMENTATION_v10.md）。
+    //   开关仍然保留：置 0 可整块量化异常逻辑的面积/Fmax 代价。
+    parameter TRAP_ENABLE = 1
 ) (
     input clock,
     input reset,
@@ -42,11 +45,14 @@ module Control #(
     input ecall_flag,
     input intr_pending,
     input MEM_mem_ren,
+    // v15：MEM 级 load 数据本拍可用（DCache 的 M1 探测口命中）→ 免停 + 可前递
+    input MEM_m1_ok,
     input MEM_PIPE_mem_ren,
     input fence_i_flag,
     input [4:0] IDU_rs1,
     input [4:0] IDU_rs2,
     input IDU_valid,
+input IDU_ready,          // ★ v13.2（P0）：ID 级被下游接收 = EXU_ready & ~IFU_stall
     input EXU_valid,
     input MEM_valid,
     input MEM_PIPE_valid,
@@ -57,6 +63,14 @@ module Control #(
     input [4:0] MEM2_rd,
     input EXU_mem_ren,
     input EXU_R_Wen,
+    // ★ v10 新增（C10）：EX 级的 CSR 写使能位图。CSR 写最终在 WB 级才生效，而 mret 在
+    //   译码级就要读 mepc —— 这根线给 4 深影子链当输入，用来做 CSR RAW 前递。
+    input [15:0] EXU_csr_wen,
+    // ★ v10.2 新增：CSR 读口的 RAW 前递（读密-写松，两者天然差三级）。
+    //   IDU_csr_sel = 本拍要读的 CSR 独热码；csr_rd_fwd(_en) = 最新一次在途写的值。
+    input [15:0] IDU_csr_sel,
+    output logic [31:0] csr_rd_fwd,
+    output logic        csr_rd_fwd_en,
     input MEM_R_Wen,
     input MEM_PIPE_R_Wen,
     input MEM2_R_Wen,
@@ -94,16 +108,29 @@ module Control #(
     //   挂起标志要到判定那一拍的时钟沿才置位，只送挂起标志会晚一拍。§CONTROL-27
     output logic  bp_hold_exu,
 
-    // C4 统一异常通道：两拍分工 —— trap_take（登记拍）触发 CSR 登记 mepc/mcause/mtval；
-    //   trap_take_q（下一拍）把"只发一次"的重定向送到 mtvec。trap_cause 是 `EXC_* 独热码，
-    //   fault_addr/fault_inst 是 mtval 的取值来源。
+    // C4 统一异常通道：trap_take（单拍）既触发 CSR 登记 mepc/mcause/mtval，也当拍把
+    //   重定向送到 mtvec。trap_cause 是 `EXC_* 独热码，fault_addr/fault_inst/fault_pc 是
+    //   mepc/mtval 的取值来源。
+    // ★ v10 变更：原来的两拍 pair（trap_take + trap_take_q 补发）已**整体废除**。
+    //   它存在的唯一理由是"旧前端在 ready=0 时会丢掉重定向脉冲"。v10 的 IFU 里
+    //   `if (dnpc_flag) pc <= dnpc;` 是**无条件**的（不看 ready/valid/队列深度），
+    //   所以补发不但没必要，还有害：补发那一拍 EX 级已经没有异常了，trap_cause=0000，
+    //   会把刚写好的 mcause 覆盖成 0（实测 exc_illegal：cyc14 mcause=2 → cyc15 mcause=0）。
     output logic        trap_take,
-    output logic        trap_take_q,
     output logic [ 3:0] trap_cause,
     output logic [31:0] fault_addr,
     output logic [31:0] fault_inst,
+    output logic [31:0] fault_pc,
     // 当前 EX 级是否处于同步异常态（供波形/断言观察）
-    output logic        exc_pending
+    output logic        exc_pending,
+    // ★★ v13.2（P0）新增：ID 级"系统指令（ecall/mret）确实会提交"的许可，直通给 IDU，
+    //   用来门控 CSR 的副作用。见下面 sys_commit_ok 的定义与 IDU.sv 的端口注释。
+    output logic        sys_commit_ok,
+    // ★ v12（B）新增：系统重定向观察口（mret/ecall/fence.i/trap_redirect，**不含**分支
+    //   预测失败）。它就是下面那根内部网的直通，纯观察，不参与任何逻辑。
+    //   为什么需要：板上只看 dnpc_flag 分不清"重定向是异常/系统指令引起的"还是"分支预测
+    //   失败引起的"—— 前者意味着程序跑飞，后者是流水线正常行为，两者判读完全相反。
+    output logic        system_redirect_dbg
 );
 
 
@@ -145,12 +172,17 @@ module Control #(
     //   指令永远进不了 EX → 锁死。判定分段与踩坑史：syn/修复史_全量.md §CONTROL-5/§CONTROL-26
     logic exc_ill, exc_load_mis, exc_store_mis, exc_iaddr_mis;
     assign exc_ill       = EXU_illegal_exc;
-    assign exc_load_mis  = EXU_mem_misalign_exc & ~EXU_mem_misalign_funct3[1]
-                         &  EXU_mem_misalign_funct3[2];   // 100/101 = lbu/lhu -> load
-    assign exc_store_mis = EXU_mem_misalign_exc &  EXU_mem_misalign_funct3[1]
-                         & ~EXU_mem_misalign_funct3[2];   // 001 = sh -> store
-    // funct3 只用来区分 load/store（mcause 4 还是 6）：0xx=load 族（lb/lh/lw/lbu/lhu），
-    //   1xx 里只有 001(sh) 是 store 族（sb=000、sw=010 天然对齐，不会走到这里）。
+    // ★ v10 修复（C12）：load / store 非对齐必须按**指令的 opcode** 区分，不能只看 funct3。
+    //   原因：`lw` 和 `sw` 的 funct3 都是 010，`lh` 和 `sh` 都是 001 —— funct3 里根本
+    //   没有"这是读还是写"的信息。原实现靠 `funct3[2]`（只有 lbu/lhu 是 1xx）猜，
+    //   于是 lw 非对齐被判成 **store** 非对齐（mcause 报 6，应为 4）。
+    //   实测 exc_misalign：`lw` at 0x24 的 mcause 报 6，测试期望 4。
+    //   出错指令编码本来就在手（fault_inst = IDU_inst_d，与异常标志同拍锁存），
+    //   直接看 opcode[6:0] 即可，既准确又不需要新增端口。
+    logic fault_is_store;
+    assign fault_is_store = (EXU_fault_inst[6:0] == `S_opcode);
+    assign exc_load_mis  = EXU_mem_misalign_exc & ~fault_is_store;
+    assign exc_store_mis = EXU_mem_misalign_exc &  fault_is_store;
     assign exc_iaddr_mis = EXU_iaddr_misalign_exc;
 
     logic exc_any;
@@ -169,31 +201,50 @@ module Control #(
                       : `EXC_NONE;
 
     // mtval 取值：非法指令给指令编码（IDU 的原始 inst），其余给出错地址。
-    //   地址取 Ex_result（对 load/store 是有效地址，对跳转是目标地址）。
+    // ★ v10 修复（C9）：分支的"出错地址"必须是**跳转目标**，不是 Ex_result。
+    //   对 jal/jalr，Ex_result 就是目标地址；但对条件分支，Ex_result 是**比较结果**
+    //   （bit0 为方向），拿它写 mtval 会把 0/1 当成地址 —— 只在条件分支目标非对齐时
+    //   才暴露。actual_target 正好是 `jump_flag ? Ex_result : branch_pc`，即真实目标。
+    //   对 load/store，Ex_result 仍是有效地址，保持不变。
     assign fault_inst = EXU_fault_inst;
-    assign fault_addr = Ex_result;     // EXU 的有效地址/跳转目标（端口名是 Ex_result）
-    // 在异常指令位于 EX 级的那一拍认定一次异常；去重靠 ~trap_take_q_r
-    logic trap_take_q_r;
-    assign trap_take = exc_pending & ~trap_take_q_r;
-    assign trap_take_q = trap_take_q_r;
-
-    always_ff @(posedge clock) begin
-        if (reset)                        trap_take_q_r <= 1'b0;
-        else if (trap_take)               trap_take_q_r <= 1'b1;  // 下一拍补发重定向
-        else                              trap_take_q_r <= 1'b0;
-    end
-
-    // 重定向脉冲：只发一次（EXU 拍 or 补发拍），语义与 bp_mispredict 对齐
-    assign trap_redirect = trap_take | trap_take_q;
+    assign fault_addr = (branch_flag | jump_flag) ? actual_target : Ex_result;
+    // ★ v10 新增（C9）：mepc 用的"出错指令 PC"。异常是在 **EX 级**判出来的，而 CSR 的
+    //   pc 端口接的是**译码级**PC —— 两者差两条指令。原来直接用译码级 PC 写 mepc，
+    //   实测 exc_illegal：出错指令在 0x1c，写进 mepc 的却是 0x20，mret 直接跑飞。
+    assign fault_pc   = EXU_pc;
+    // 在异常指令位于 EX 级的那一拍认定一次异常。★ v10：去掉了原来的
+    //   `& ~trap_take_q_r` 去重寄存器 —— EXU 在 trap_take 那一拍就把异常标志清掉
+    //   （EXU.sv 的 `if (reset | trap_take)`），所以 exc_pending 天然只有一拍宽。
+    assign trap_take = exc_pending;
+    // 重定向脉冲：与 bp_mispredict 同语义的**单拍**命令（v10：不再有补发拍）
+    assign trap_redirect = trap_take;
 
     logic bp_misp_det;                       // 判定条件为真（不受 mem_stall 影响）
-    // ★ 不变量：误预测判定必须排除 intr_take|system_redirect|trap_redirect（这三个源各自会
-    //   清掉 EX 级那条指令并给出自己的有效 dnpc，不排除就会同拍抢 dnpc_flag：脉冲发了、PC
+    // ★ 不变量：误预测判定必须排除 intr_take|trap_redirect（这两个源各自会清掉 EX 级
+    //   那条指令并给出自己的有效 dnpc，不排除就会同拍抢 dnpc_flag：脉冲发了、PC
     //   却按另一个源走），且**只能被推后、不能被丢弃**（原实现把判定压成 0，误预测永远没人
     //   处理）。§CONTROL-2/§CONTROL-3
     //   注意 bp_hold_exu 里必须含当拍的 bp_misp_det：挂起标志要到判定那一拍的时钟沿才置位，
     //   只送挂起标志会晚一拍，挡不住正好在判定拍进入 EX 的那条错路径指令（B7）。
-    assign bp_misp_det = EXU_ctrl_valid & ~(intr_take | system_redirect | trap_redirect) &
+    //
+    // ★★ v12（C）修复（v12-BUG-1）：原来的屏蔽项里还有 **system_redirect**，那是**错的**。
+    //   `system_redirect = mret_flag | ecall_flag | fence_i_flag | trap_redirect` 里前三个
+    //   都是 **IDU（译码级）** 的译码标志 —— 属于**更年轻**的指令，它们既不产生自己的
+    //   分支判定，也**不会**清掉 EX 级那条（EXU_inst_clear 里没有这三个）。
+    //   把它们并进屏蔽项，就变成"更年轻的 mret 把更老的分支的误预测**吞掉**"。
+    //
+    //   实测（sim/brsel_h.hex，中断处理程序里）：
+    //     0x31c  bne x24, x0, hx      ← EX 级，实际 not-taken
+    //     0x320  addi x6, x6, 1       ← 正确路径（永远没执行）
+    //     0x324  mret                 ← 预测 taken 取来的是它
+    //   抓到的现场（cyc=100022）：
+    //     EXU_pc=0x31c（bne 在 EX）· IDU_pc=0x324（mret 在译码 → sysred=1）
+    //     → bp_misp_det 被 sysred 屏蔽成 0 → 没有重定向 → 直接执行了 mret，
+    //     0x320 被永久跳过。handler 每进一次就丢一条指令，而且**不报错**。
+    //   优先级链本来就已经是 intr_take > trap_redirect > bp_mispredict > system_redirect
+    //   （见下面 dnpc 的三元链），所以"老的分支先重定向、mret 之后重新取"是正确语义 ——
+    //   屏蔽项里不需要 system_redirect。
+    assign bp_misp_det = EXU_ctrl_valid & ~(intr_take | trap_redirect) &
                          ((actual_taken != EXU_pred_taken) ||
                           (actual_taken && (actual_target != EXU_pred_target)));
 
@@ -257,17 +308,46 @@ module Control #(
 
     // 系统事件（异常返回 / ecall / fence.i）不由预测器覆盖，必须强制重定向；
     //   C4：同步异常也走这条"强制重定向、不许预测器覆盖"的路
-    assign system_redirect = mret_flag | ecall_flag | fence_i_flag | trap_redirect;
+    //
+    // ★★ v13.2（P0）修复：**系统指令必须"确实会提交"才算数**。
+    //   为什么：ecall/mret 的 CSR 副作用（mstatus/mepc/mcause）在 ID 级组合提交，
+    //   而 ecall_flag/mret_flag 是纯译码电平 —— 只要那条指令还在 ID 就恒为 1。
+    //   于是两种情况下它"错路径也生效"：
+    //     ① 更老的误预测分支在 EX 同拍成立 → dnpc 按优先级取 bp_redir_target、
+    //        并 flush 掉 ID；那条 ecall 被冲掉了，却已经把 mstatus 改了；
+    //     ② ID 被下游压住（!IDU_ready，load-use / mem_stall / MDU）→ 同一拍里
+    //        每个周期都提交一次（原来的 8 拍 trap_blank 只是把窗口缩小）。
+    //   实测（FreeRTOS 空闲任务的 taskYIELD，pc=0x2d8，docs/CHECKPOINT_v13.md §7）：
+    //   同一条 ecall 提交三次 → mstatus 0x1888 → 0x1880 → 0x1800，
+    //   MPIE 被写成 0，mret 之后 MIE 永久为 0，tick 只来一次。
+    //   修法：ecall/mret 的"提交许可"= ID 级有指令 且 被接收 且 本拍没有更老的重定向。
+    //   重定向本身也用同一个许可（否则"提交了但重定向被丢"又会重复提交）。
+    //   ★ 不变量：许可里三项都不许删；fence.i 不在此列（它来自 EX，天然不年轻）。
+    assign sys_commit_ok = IDU_valid & IDU_ready
+                         & ~(intr_take | trap_redirect | bp_mispredict);
+
+    assign system_redirect = ((mret_flag | ecall_flag) & sys_commit_ok)
+                           | fence_i_flag | trap_redirect;
+
+    // v12（B）：观察口直通（纯 assign，无逻辑，不改变原有行为）
+    assign system_redirect_dbg = system_redirect;
 
     // 中断接收判定（精确中断）：只在执行级没有会重定向的分支/跳转/fence、当前译码指令不是
     //   ecall/mret、且没有 load-use/MDU 停顿时才接受，保证 mepc 指向真正被中断的指令；入口
     //   固定为 mtvec。★ 不变量：intr_safe 的每一项都不许删（IDU_valid=确实有指令可记为 mepc；
     //   ~(branch|jump|fence_i)=让改 PC 的指令先走完；~mret/~ecall=系统指令不插队；~IFU_stall=
     //   译码级那条还没被接收；~mdu_busy=MDU 迭代期 EX 级一直占着）。
+    // ★ v10 修复（C8）：补上 ~trap_redirect。原来漏了它，于是"同步异常"与"中断"可以同拍
+    //   成立：trap_take 让 CSR 登记 mcause=异常码/mepc=异常指令，而 dnpc_flag 的仲裁优先级
+    //   intr_take > trap_redirect 又把 PC 送去了 mtvec —— 两者目标恰好相同（都是 mtvec），
+    //   所以现象不是跑飞，而是 **mepc 被中断覆盖成错的 PC**（mret 回不到出错指令），
+    //   或者 mepc 被同拍写两次（CSR 里两个写使能同时置位，结果取决于书写顺序）。
+    //   这类"目标相同、现场被踩"的 bug 没有报错，只有异常嵌套时才暴露。
     logic intr_safe;
     assign intr_safe = IDU_valid
                      & ~(branch_flag | jump_flag | fence_i_flag)
-                     & ~mret_flag & ~ecall_flag & ~IFU_stall & ~mdu_busy;
+                     & ~mret_flag & ~ecall_flag & ~IFU_stall & ~mdu_busy
+                     & ~trap_redirect;
     assign intr_take = intr_pending & intr_safe;
 
     // dnpc_flag：本拍"要重定向 PC"的总请求，同时是 IDU 的 flush。四个源按仲裁优先级：
@@ -291,7 +371,116 @@ module Control #(
     assign EXU_inst_clear = intr_take | bp_mispredict | trap_redirect
                           | (mem_stall & ~(branch_flag | jump_flag))
                           | load_use_stall;
+
     // C2/B5：load-use 分级判定已搬进 Data_hazard，本模块不再写第二份。§CONTROL-14
+
+    /* ---- v10 新增（C10）：CSR 写影子流水 + mret 目标前递 ------------------- */
+    // 问题：CSR 写是**精确提交**的（走到 WB 级才落寄存器），而 `mret` 在**译码级**就必须
+    //   读出 mepc 去改 PC —— 两者相隔 5 级，中间没有任何前递。于是
+    //       csrw mepc, x21        ; handler 把 mepc 改成"出错指令+4"
+    //       mret                  ; 紧隔一条
+    //   里 mret 读到的是**旧** mepc。实测 exc_illegal：handler 明明写好了 0x20，
+    //   mret 还是回到 0x1c 的非法指令 → 无限陷入（23 次 / 400 拍）。
+    // 方案：把 EX 级的 CSR 写事件（地址位图 + 写数据）打一条 4 深影子链，在译码级前递：
+    //     sh[0]=M1  sh[1]=M2  sh[2]=M3  sh[3]=WB
+    //   写数据在流水里就是各级的 Ex_result（csrrw -> rs1+0；csrrs -> csrs|rs1），
+    //   所以不需要新数据通路，只要位图 + 一份延迟副本。深度 4 正好覆盖到 WB 那一拍，
+    //   之后寄存器已经落盘（mepc_out 本身就对），不必再前递。
+    // ★ 不变量：只在 `EXU_valid & ~EXU_inst_clear` 那拍吸收 —— 被冲刷的指令不会真的写
+    //   CSR，吸进来就会前递一份"根本没发生"的写。
+    localparam CSRF_D = 4;
+    logic [15:0] csrwen_sh [0:CSRF_D-1];
+    logic [31:0] csrval_sh [0:CSRF_D-1];
+    // ★ 不变量：**EX 级本身也要参与前递**（这是距离 1 的那一档：mret 在译码级时，
+    //   它前面那条 csrw 正好就在 EX 级）。影子链 sh[0] 是"上一拍在 EX 的那条"，
+    //   也就是这一拍在 M1 的那条 —— 只前递影子链会漏掉最近的这一档。
+    logic [15:0] csrwen_now;
+    assign csrwen_now = (EXU_valid & ~EXU_inst_clear) ? EXU_csr_wen : 16'b0;
+
+    // ★ v10.3：影子链里必须存**掩码后**的写值，而不是 ALU 原始结果 Ex_result。
+    //   Ex_result 是"ALU 算出来的新值"，而寄存器落盘时还要过一遍 WARL 写掩码
+    //   （mip 只有 MSIP 可写、mstatus 的 MPP 恒 3、mtvec/mepc 低 2 位恒 0 …）。
+    //   若链里存原始值，"csrw 紧跟 csrr"（走前递）与"隔几条再 csrr"（读寄存器）
+    //   会对同一个 CSR 给出两个不同的答案 —— v10.3 加掩码时就是这么暴露的：
+    //   `csrw mip,0xFFFFFFFF` 紧跟 `csrr x18,mip` 读回 0xFFFFFFFF，寄存器里却只有 1。
+    //   掩码与强制位取自 para.sv 的 `CSR_WMASK_* / `CSR_FORCE_*，与 CSR.sv 共用同一组宏，
+    //   ★ 不变量：这两个宏在 CSR.sv 与这里必须成对使用，改一处必须改两处。
+    logic [31:0] fwd_wmask;
+    logic [31:0] fwd_force;
+    logic [31:0] csrval_now;
+    always_comb begin
+        fwd_wmask = `CSR_WMASK_ALL;
+        fwd_force = 32'b0;
+        if (csrwen_now[`CSRW_MIP])      fwd_wmask = `CSR_WMASK_MIP;
+        if (csrwen_now[`CSRW_MIE])      fwd_wmask = `CSR_WMASK_MIE;
+        if (csrwen_now[`CSRW_MTVEC])    fwd_wmask = `CSR_WMASK_MTVEC;
+        if (csrwen_now[`CSRW_MEPC])     fwd_wmask = `CSR_WMASK_MEPC;
+        if (csrwen_now[`CSRW_MSTATUS]) begin
+            fwd_wmask = `CSR_WMASK_MSTATUS;
+            fwd_force = `CSR_FORCE_MSTATUS;
+        end
+    end
+    assign csrval_now = (Ex_result & fwd_wmask) | fwd_force;
+
+    integer ci;
+    always_ff @(posedge clock) begin
+        if (reset) begin
+            for (ci = 0; ci < CSRF_D; ci = ci + 1) begin
+                csrwen_sh[ci] <= 16'b0;
+                csrval_sh[ci] <= 32'b0;
+            end
+        end else begin
+            csrwen_sh[0] <= csrwen_now;
+            csrval_sh[0] <= csrval_now;
+            for (ci = 1; ci < CSRF_D; ci = ci + 1) begin
+                csrwen_sh[ci] <= csrwen_sh[ci-1];
+                csrval_sh[ci] <= csrval_sh[ci-1];
+            end
+        end
+    end
+
+    // mepc 的前递读：从最老往最新覆盖，最后一次赋值生效 ⇒ **最新**的在途写优先
+    //   优先级（新→旧）：EX 级（距离 1）> sh[0]=M1 > sh[1]=M2 > sh[2]=M3 > sh[3]=WB > 寄存器本体
+    logic [31:0] mepc_fwd;
+    integer cj;
+    always_comb begin
+        mepc_fwd = mepc_out;
+        for (cj = CSRF_D-1; cj >= 0; cj = cj - 1)
+            if (csrwen_sh[cj][`CSRW_MEPC]) mepc_fwd = csrval_sh[cj];
+        if (csrwen_now[`CSRW_MEPC]) mepc_fwd = csrval_now;
+    end
+
+    /* ---- v10.2 新增：CSR 读口的通用 RAW 前递 ------------------------------
+     * 上面那条链原本只服务 mret 读 mepc 这一个场景。同一份在途写信息可以服务**所有** CSR
+     * 读：IDU 把"本拍要读哪个 CSR"的独热码（IDU_csr_sel）送过来，这里按
+     * "EX 级 > sh[0..3] > 寄存器本体"的优先级挑出最新一次在途写的值。
+     * ★ 不变量：命中判据是 `|(在途位图 & 读选通)`，用的是**写位图**而不是写使能标记
+     *   （bit8）—— 纯读的 CSRR* 也带 bit8 标记位，用它判命中会把"读"当成"写"。
+     * ★ 不变量：多档同时命中时**最新的赢**，与 mepc_fwd 的覆盖顺序严格一致（只改读值，
+     *   不改变"写在哪一级落盘"的事实）。
+     */
+    logic csr_hit_now;
+    logic [CSRF_D-1:0] csr_hit_sh;
+    assign csr_hit_now = |(csrwen_now   & IDU_csr_sel);
+    assign csr_hit_sh[0] = |(csrwen_sh[0] & IDU_csr_sel);
+    assign csr_hit_sh[1] = |(csrwen_sh[1] & IDU_csr_sel);
+    assign csr_hit_sh[2] = |(csrwen_sh[2] & IDU_csr_sel);
+    assign csr_hit_sh[3] = |(csrwen_sh[3] & IDU_csr_sel);
+
+    integer ck;
+    always_comb begin
+        csr_rd_fwd    = 32'b0;
+        csr_rd_fwd_en = 1'b0;
+        for (ck = CSRF_D-1; ck >= 0; ck = ck - 1)
+            if (csr_hit_sh[ck]) begin
+                csr_rd_fwd    = csrval_sh[ck];
+                csr_rd_fwd_en = 1'b1;
+            end
+        if (csr_hit_now) begin
+            csr_rd_fwd    = csrval_now;
+            csr_rd_fwd_en = 1'b1;
+        end
+    end
     // mdu_busy 并入前端暂停。★ 不变量：它只能进 IFU_stall，不能进上面 load-use 项（否则
     //   打断 M 自己的向后 valid，乘除结果直接丢失）。
     assign IFU_stall      = load_use_stall | mdu_busy;
@@ -301,12 +490,21 @@ module Control #(
 
 
     // dnpc 统一承载控制流重定向（来源与 dnpc_flag 的优先级一一对应）：中断取 mtvec_out；
-    //   误预测取 bp_redir_target（不跳转回退 pc+4，挂起时优先 bp_pend_target）；mret 取
-    //   mepc_out，ecall/同步异常入口取 mtvec_out。
+    //   误预测取 bp_redir_target（不跳转回退 pc+4，挂起时优先 bp_pend_target）；
+    //   **fence.i 取自己的 PC+4**（v10.2 修复，见下）；mret 取 mepc（前递后的 mepc_fwd，
+    //   见上面 C10），ecall/同步异常入口取 mtvec_out。
     //   ★ 不变量：这条链的顺序必须与 dnpc_flag 的或项顺序一致，否则"请求来自 A、目标取自 B"。
-    assign dnpc = intr_take ? mtvec_out
-                : bp_mispredict ? bp_redir_target
-                : (mret_flag ? mepc_out : mtvec_out);
+    //   ★ v10.2 修复：fence.i 原来落到最后那个 `mtvec_out` 分支 —— 于是 `fence.i` 不是
+    //     "清 I-Cache 后继续往下执行"，而是**跳进异常处理程序**（mtvec 默认为 0 → 整机
+    //     重启）。程序中只要出现一条 fence.i，后面的代码就永远跑不到。fence.i 的语义是
+    //     "顺序继续"，目标必须是它自己后面的那条指令；fence_i_flag 来自 EX 级
+    //     （EXU_fence_i_flag），EXU_pc 正是这条 fence.i 的 PC。
+    //     排序上它必须排在 bp_mispredict 之后（挂起的误预测先来先服务）、并且独立于
+    //     mret_flag（两者分属 EX/ID 级，不可能同拍）。
+    assign dnpc = intr_take      ? mtvec_out
+                : bp_mispredict  ? bp_redir_target
+                : fence_i_flag   ? (EXU_pc + 32'd4)
+                : (mret_flag     ? mepc_fwd : mtvec_out);
 
 
 
@@ -346,6 +544,7 @@ Data_hazard Data_hazard_inst (
     .IDU_valid      (IDU_valid),
     .WB_valid       (WB_valid),
     .MEM_mem_ren    (MEM_mem_ren),
+    .MEM_m1_ok      (MEM_m1_ok),
     .MEM_PIPE_mem_ren(MEM_PIPE_mem_ren),
     .EXU_R_Wen      (EXU_R_Wen),
     .EXU_mem_ren    (EXU_mem_ren),
