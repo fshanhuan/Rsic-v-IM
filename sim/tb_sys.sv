@@ -82,6 +82,8 @@ module tb_sys;
     myCPU u_cpu (
         .cpu_clk            (clk),
         .cpu_rst            (rst),
+        .dcache_inval          (1'b0),   // 本台子不测一致性：钉 0（见 tools/tie_optional_ports.py）
+        .ext_irq            (1'b0),        // A2：本 TB 不测外部中断（悬空会变 z，污染 mip）
         .irom_addr          (irom_addr),
         .irom_data          (irom_data),
         .irom_en            (),

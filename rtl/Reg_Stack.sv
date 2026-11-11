@@ -24,6 +24,13 @@ module Reg_Stack (
     input  logic        ecall_flag,
     input  logic        mret_flag,
     input  logic        intr_take,
+    input  logic        ext_irq,      // ★ A2：PLIC-lite 的外部中断汇总 → CSR.mip.MEIP
+    // ---- A3：CLINT（mtime/mtimecmp 的唯一计数源在 rtl/clint.sv）----
+    input  logic [31:0] mtime_in,
+    input  logic [31:0] mtimecmp_in,
+    output logic        mtime_we_o,
+    output logic        mtimecmp_we_o,
+    output logic [31:0] clint_wdata_o,
 
     // ---- 通用寄存器侧：rs1/rs2 是 ID 级的组合读地址，rd/rd_value 是 WB 级的写口 ----
     input  logic [ 4:0] rs1,
@@ -139,6 +146,12 @@ module Reg_Stack (
         .ecall_flag   (ecall_flag),
         .mret_flag    (mret_flag),
         .intr_take    (intr_take),
+        .ext_irq      (ext_irq),      // A2
+        .mtime_in     (mtime_in),     // A3
+        .mtimecmp_in  (mtimecmp_in),
+        .mtime_we_o   (mtime_we_o),
+        .mtimecmp_we_o(mtimecmp_we_o),
+        .clint_wdata_o(clint_wdata_o),
         // v9 新增（C4）：统一异常通道（v10：trap_take_q → fault_pc）
         .trap_take    (trap_take),
         .trap_cause   (trap_cause),

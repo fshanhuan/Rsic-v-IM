@@ -85,8 +85,18 @@ def main() -> int:
                                     for i in range(0, len(text), 4)])
         print(f"  wrote {args.irom}")
     if args.dram:
-        write_hex(Path(args.dram), [int.from_bytes(dpart[i:i + 4], "little")
-                                    for i in range(0, len(dpart), 4)])
+        # ★ 即使 .rodata/.data 为空也要写**一个**字。
+        #   原因：_diag/load_uart.ps1 读 hex 时会 `throw "no words in ..."`，
+        #   于是一个"没有 .data 的小程序"就永远加载不上去 —— 上板时表现为
+        #   "程序不跑"，实际是镜像根本没发出去（2026-11-10 踩到：irqtest/
+        #   clinttest/irqdiag 全部中招，monitor 因为 .data 非空才没事）。
+        #   写一个字（0）只是往 DRAM 0x1_0000 写个 0，无害，但让加载器能工作。
+        dwords = [int.from_bytes(dpart[i:i + 4], "little")
+                  for i in range(0, len(dpart), 4)]
+        if not dwords:
+            dwords = [0]
+            print("  note: empty .data/.rodata -> dram hex padded with one zero word")
+        write_hex(Path(args.dram), dwords)
         print(f"  wrote {args.dram}")
     return 0
 

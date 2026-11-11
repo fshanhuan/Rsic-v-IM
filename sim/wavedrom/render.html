@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WaveDrom render</title>
+<!-- 离屏出图页：用两个工具**各自的**引擎（wavedrom 3.5.0 + 皮肤）渲染同一份 WaveJSON。
+       render.html?v=gui#<encodeURIComponent(JSON)>     ← wavedrom-gui.html 里的引擎
+       render.html?v=plugin#<encodeURIComponent(JSON)>  ← kodbox 插件 editor.html 里的引擎
+     hash 的解析方式与 GUI 自己的「分享链接」一致（decodeURIComponent + JSON.parse，不 eval）。 -->
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  #wv0 { display: inline-block; }
+  #err { color: #c00; font: 13px/1.6 monospace; padding: 8px; white-space: pre-wrap; }
+</style>
+<script>
+  (function () {
+    var v = (new URLSearchParams(location.search)).get('v') || 'gui';
+    ['skin-default.js', 'skin-narrow.js', 'wavedrom-3.5.0.js'].forEach(function (f) {
+      document.write('<script src="vendor/' + v + '/' + f + '"><\/script>');
+    });
+    /* ?fs=<px>：拍窗压密后（每格 80px）10 字符的总线标签在 14px 下会互相压住，
+       这里允许单张图把字号调小；不传则完全用皮肤默认值。
+       只改文字，不改格子宽度（WaveDrom 的 width 由 hscale 算，与字号无关）。 */
+    var fs = (new URLSearchParams(location.search)).get('fs');
+    if (fs) {
+      document.write('<style>#wv0 svg text { font-size: ' + parseFloat(fs) + 'px !important; }</style>');
+    }
+  })();
+</script>
+</head>
+<body>
+<div id="wv0"></div>
+<div id="err"></div>
+<script>
+(function () {
+  var raw = location.hash ? decodeURIComponent(location.hash.slice(1)) : '';
+  if (!raw) { document.getElementById('err').textContent = 'no hash'; return; }
+  var json;
+  try { json = JSON.parse(raw); }
+  catch (e) { document.getElementById('err').textContent = 'JSON error: ' + e.message; return; }
+  try {
+    var rwf = window.WaveDrom.renderWaveForm || window.WaveDrom.RenderWaveForm;
+    rwf.call(window.WaveDrom, 0, json, 'wv');
+    /* 与 GUI 的 renderPreview 同样的自愈：皮肤 <style> 失效会让波形糊成黑块 */
+    document.querySelectorAll('#wv0 svg style').forEach(function (st) {
+      if (st.disabled) st.disabled = false;
+      if (!st.sheet || !st.sheet.cssRules.length) st.textContent = st.textContent;
+    });
+    var svg = document.querySelector('#wv0 svg');
+    /* 出图脚本靠 <title> 读回真实尺寸（--dump-dom 一次就够，不必猜窗口大小） */
+    if (svg) {
+      document.title = 'WD ' + svg.getAttribute('width') + 'x' + svg.getAttribute('height');
+      document.body.setAttribute('data-w', svg.getAttribute('width'));
+      document.body.setAttribute('data-h', svg.getAttribute('height'));
+    }
+  } catch (e) {
+    document.getElementById('err').textContent = 'render error: ' + e.message;
+  }
+})();
+</script>
+</body>
+</html>

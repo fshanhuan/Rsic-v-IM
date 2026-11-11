@@ -3,25 +3,21 @@
 /* =============================================================================
  * sim/tb_board_top_uart.sv — v12（B）UART MMIO 端到端测试（板级）
  * -----------------------------------------------------------------------------
- * 前面两个测试台各管一段：
- *   tb_uart_tx.sv        —— 发送器本身对不对（回环）
- *   tb_sys (+kind=zicntr)—— CSR/计数器对不对
- * 这个测试台补最后一段、也是最容易出问题的一段：**CPU 真的能"打印"吗**。
- * 它把 board_top（带 MMIO 译码 + DCache + uart_tx）整块跑起来，用程序里的
- * `sw 0(x1), x2` 往 0x1000_0000 写，再把 uart_tx 的输出接一个 uart_rx 当"串口终端"。
+ * 层次：
+ *   tb_uart_tx.sv        发送器本身对不对（回环）
+ *   tb_board_top_uart    TXDATA/TXSTAT 经 MMIO 写、经真实 uart_tx 发出去
+ *   tb_sys (+kind=zicntr) CSR/计数器对不对
  *
  * 判据（对应 sim/gen_uart_mmio_prog.py 的程序）：
- *   U1 串口先收到 'H'(0x48)，再收到 'i'(0x69) —— MMIO 写 + busy 轮询都通
- *   U2 x5 == 0xCAFE0000：MMIO 写**没有**顺带改掉 DRAM 第 0 个字
- *      （board_top 里 dram 的 wen 必须被 ~mmio_uart_sel 门掉；漏门是"打一个字，
+ *   U1 串口先收到 'H'(0x48)，再收到 'i'(0x69) —— MMIO 写 + busy 轮询都对
+ *   U2 x5 == 0xCAFE0000：MMIO 写没有踩坏 DRAM
+ *      （board_top 的 dram.wen 必须被 ~mmio_uart_sel 门掉；漏门就是"打一个字，
  *       栈里的变量莫名变了"这种最恶心的一类 bug）
- *   U3 x8 == 0x1234：普通 DRAM 读写没被 MMIO 译码误伤
- *   U4 x10 == 0x600D：程序走到了尾（不是跑飞后碰巧通过）
+ *   U3 x8 == 0x1234：普通 DRAM 读写没被 MMIO 干扰
  *
- * ★ 时钟用 50MHz（#10）：板上就是 50MHz（board_top_ila 的 MMCM 分频），
- *   BIT_TICKS(50MHz,115200) = 434，与真板完全一致。
- * ★ uart_rx 的 CLK_FREQ 必须与 board_top 里 uart_tx 的 CLK_FREQ 相同，
- *   否则收下来的每个字节都是错的（位宽对不上）。
+ * ★ BIT_TICKS(50MHz,115200) = 434，与真板完全一致；
+ *   uart_rx 的 CLK_FREQ 必须与 board_top 的 uart_tx 相同，否则每个字节都收错。
+ * ★ IROM 实例已提到 generate 外，路径是 u_board.irom_inst（不再是 g_irom_rom.*）。
  * ============================================================================= */
 module tb_board_top_uart;
 
@@ -29,7 +25,7 @@ module tb_board_top_uart;
     logic btn_rst_n = 1'b0;     // 按键：低有效，先按住
     always #10 clk = ~clk;      // 50MHz（与板上一致）
 
-    // ------------------------------------------------------------ 板级观测口
+    // ------------------------------------------------------------ 板级观测
     logic        dbg_have_inst, dbg_ena, dbg_trap_take, dbg_dnpc_flag, dbg_ready;
     logic [31:0] dbg_pc, dbg_value, dbg_ifu_pc;
     logic [ 4:0] dbg_reg;
@@ -44,7 +40,7 @@ module tb_board_top_uart;
     board_top #(
         .IROM_WORDS (4096),
         .DRAM_WORDS (16384),
-        .IROM_INIT  (""),         // 运行时 $readmemh（见下）
+        .IROM_INIT  (""),         // 运行$readmemh（见下）
         .IROM_BOOT  (0)
     ) u_board (
         .sys_clk               (clk),
@@ -73,9 +69,9 @@ module tb_board_top_uart;
         .debug_status          (dbg_status),
         .debug_mcycle          (dbg_mcycle),
 
-        // IROM_BOOT=0 → 引导逻辑不综合，uart_rx 接固定电平即可
-        .uart_rx               (1'b1),
-        .uart_tx               (uart_tx_line),     // ★ 被测的串口发送线
+        // IROM_BOOT=0 引导逻辑不综合，uart_rx 接固定电平即
+    .uart_rx               (1'b1),
+        .uart_tx               (uart_tx_line),     // 被测的串口发送线
         .debug_boot_busy       (boot_busy),
         .debug_boot_ok         (boot_ok),
         .debug_boot_err        (boot_err)
@@ -127,16 +123,15 @@ module tb_board_top_uart;
     logic done = 1'b0;
     integer k;
     integer guard;
-    // 无标记程序（比如 sim/uart_hello.hex 是**无限循环**打印）不会有 x10=0x600D，
-    // 所以允许用 +maxticks=N 把观察窗口拉长，用来验证"周期性重复打印"。
-    //   默认 200000 拍（4ms）—— 足够跑完 uart_mmio.hex。
-    //   验证 hello 时用 +maxticks=2600000（52ms，覆盖 2~3 轮 14ms 的延时）。
+    // 无标记程序（比如 sim/uart_hello.hex *无限循环**打印）不会有 x10=0x600D    // 所以允许用 +maxticks=N 把观察窗口拉长，用来验证"周期性重复打
+    //   默认 200000 拍（4ms）—足够跑完 uart_mmio.hex
+    //   验证 hello 时用 +maxticks=26000002ms，覆2~3 14ms 的延时）
     integer max_ticks = 200000;
 
     initial begin
-        for (k = 0; k < 16384; k = k + 1) u_board.dram_inst.mem_ram[k] = 32'h0;
-        // ★ 预置 DRAM[0] 为一个可识别的值：MMIO 写之后它必须原样不变（U2）
-        u_board.dram_inst.mem_ram[0] = 32'hCAFE_0000;
+        for (k = 0; k < 16384; k = k + 1) u_board.g_dram_single.dram_inst.mem_ram[k] = 32'h0;
+        // 预置 DRAM[0] 为一个可识别的值：MMIO 写之后它必须原样不变（U2）
+        u_board.g_dram_single.dram_inst.mem_ram[0] = 32'hCAFE_0000;
 
         if ($value$plusargs("prog=%s", prog_path)) ;
         if ($value$plusargs("maxticks=%d", max_ticks)) ;
@@ -144,9 +139,9 @@ module tb_board_top_uart;
         $display(" tb_board_top_uart : program=%0s  maxticks=%0d", prog_path, max_ticks);
         $display("   UART MMIO: TXDATA=0x1000_0000  STATUS=0x1000_0004 (bit0=busy)");
         $display("================================================================");
-        // ★ IROM_BOOT=0 时 irom_inst 在 generate 的 g_irom_rom 作用域里，
-        //   层次路径必须带上 generate 块名（漏了会报 "Unable to bind ... mem_rom"）。
-        $readmemh(prog_path, u_board.g_irom_rom.irom_inst.mem);
+        // IROM_BOOT=0 irom_inst generate g_irom_rom 作用域里
+    //   层次路径必须带上 generate 块名（漏了会"Unable to bind ... mem_rom"）
+    $readmemh(prog_path, u_board.irom_inst.mem);
 
         btn_rst_n = 1'b0;
         repeat (8) @(posedge clk);
@@ -154,13 +149,13 @@ module tb_board_top_uart;
         #1 btn_rst_n = 1'b1;
     end
 
-    // 等 x10 写回 0x600D（程序走到尾），然后再等最多 2 帧让第二个字节收完
+    // x10 写回 0x600D（程序走到尾），然后再等最2 帧让第二个字节收
     always @(negedge clk) begin
         if (btn_rst_n && !done) begin
             if (dbg_have_inst && dbg_ena && dbg_reg == 5'd10 && dbg_value == 32'h600D) begin
                 done = 1'b1;
                 $display("[END] marker x10=0x600D at cyc=%0d", cyc);
-                // 最多等 2 帧（2*10*434 = 8680 拍）让 'i' 收完
+                // 最多等 2 帧（2*10*434 = 8680 拍）'i' 收完
                 guard = 0;
                 while (rx_cnt < 2 && guard < 2*10*434) begin
                     @(posedge clk);

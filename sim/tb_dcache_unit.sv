@@ -51,6 +51,7 @@ module tb_dcache_unit;
         // 单元测试里没有「流水线推进」概念：一次访问都是单拍激励，所以推进恒为 1
         //   （整机里必须接 myCPU 的 lsu_adv，见 DCache 端口注释）。
         .cpu_adv(1'b1), .req_seq(req_seq),
+        .inval     (1'b0),   // 本台子不测一致性：钉 0（见 tools/tie_optional_ports.py）
         .mem_rdata(mem_rdata), .cpu_rdata(cpu_rdata), .mem_addr(mem_addr),
         .mem_en(mem_en), .mem_wen(mem_wen), .mem_wdata(mem_wdata),
         .mem_mask(mem_mask), .hit(hit), .miss(miss), .hold(hold),

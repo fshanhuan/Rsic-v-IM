@@ -14,7 +14,7 @@
 #define UART_TXDATA (*(volatile unsigned int *)0x10000000u)
 #define UART_TXSTAT (*(volatile unsigned int *)0x10000004u)
 
-static const char msg[] = "HELLO-APP from IROM 0x4000\n";
+static const char msg[] = "HELLO-APP from IROM 0x6000\n";
 
 static void putc_(char c)
 {

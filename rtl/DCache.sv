@@ -63,6 +63,16 @@ module DCache #(
     //   用来区分"同一条请求还在"和"同地址的下一条请求到了"—— 只比地址区分不了。
     input  logic        req_seq,
 
+    /* ★ 双核协同（第 2 步）：整表无效。
+     *   为什么需要：DCache 是**写直达**（写不脏、无需回写），所以 PS 通过 AXI 改 DRAM 之后
+     *   唯一会出错的方向是"**读到旧行**"—— 本核之前读过那一行，valid 还在、tag 还匹配。
+     *   本信号为 1 的那一拍把 `valid` 整条清零（数据/tag 不动，反正 invalid 就不可用）。
+     *   ★ 契约：只允许在**没有在途访存**时拉高（软件侧：读 PS 的数据前，先写 MMIO 触发，
+     *     再读）。本模块不做握手，也不清在途状态（mem_req_r / unc_busy）——
+     *     在途时拉高会丢掉那一拍的响应，属于**用错**，不是被保护的场景。
+     *   ★ 256 位同步复位：50 MHz 下由 Vivado 折成一组带复位的 FF，实测不压 WNS（见报告）。 */
+    input  logic        inval,
+
     /* ★ v15：M1 命中探测口（第二个读口，只读）—— 用来把 load-use 从 2 拍压到 1 拍。
      *   为什么需要第二个口：DCache 的数组读是**组合**的（`data[index]`），但地址用的是
      *   M2 那一段；而 M1 那一段（`Ex_result_addr_reg`，load 的有效地址）现在就能查。
@@ -117,7 +127,13 @@ module DCache #(
 
     // 该行是否已驻留（MMIO 恒不驻留）
     logic line_resident;
-    assign line_resident = resp_valid_r & ~uncacheable
+    /* ★ 双核协同（第 2 步）：inval 那一拍起就必须"谁都别算命中"。
+     *   第一版只在时钟沿清 valid，结果**紧跟在 invalidate 后面的那条 load 仍然命中**
+     *   （它的 M1 探测发生在 inval 那一拍，valid 还没被清）。仿真里就是 tb_dcache_stale
+     *   的 S3：invalidate 之后读回的还是旧值。修法是把 ~inval 一并放进**所有**命中判定，
+     *   于是"inval 当拍 = 全部行视为无效"，下一拍起 valid 也真的全 0，语义干净。
+     *   ★ 这条是仿真抓出来的，别把 ~inval 从这四处删掉。 */
+    assign line_resident = resp_valid_r & ~uncacheable & ~inval
                          & valid[cpu_index_r] & (tag[cpu_index_r] == cpu_tag_r);
 
     /* ---------------- 2) 向 DRAM 发读 / 等返回 ---------------- */
@@ -183,7 +199,7 @@ module DCache #(
     //   解掉 hold（数据还没回来，LSU 已被放行），把总线残留值/x 锁进 rdata_reg2。
     //   踩坑史 + 实测现象：见 syn/修复史_全量.md §DCACHE-1
     logic hit_now;
-    assign hit_now = cpu_en & ~cpu_wen & ~uncacheable_req
+    assign hit_now = cpu_en & ~cpu_wen & ~uncacheable_req & ~inval
                    & valid[index] & (tag[index] == tag_in);
 
     logic resp_for_now;
@@ -266,7 +282,7 @@ module DCache #(
      * 未命中（行不驻留）时照旧不分配、不合并 —— 写直达把数据送进 DRAM，
      *   后继 load 会 miss 后从 DRAM 取回新值（读请求比写脉冲晚 ≥1 拍）。 */
     logic store_hit_now;
-    assign store_hit_now = ~uncacheable_req & valid[index] & (tag[index] == tag_in);
+    assign store_hit_now = ~uncacheable_req & ~inval & valid[index] & (tag[index] == tag_in);
 
     /* ---------------- 4c) 同一拍"回填"与"store 合并"撞同一行 → 放弃合并 ----------------
      * ★ v13 修复（第二个真实缺陷，与 4b 同源但机制不同）：
@@ -327,7 +343,7 @@ module DCache #(
     assign m1_tag      = m1_addr[31:INDEX_BITS+2];
     assign m1_unc      = (m1_addr & ~UNCACHE_MASK) != 32'b0;
     assign m1_conflict = store_merge_now & (index == m1_idx);
-    assign m1_hit      = m1_en & ~m1_unc & ~m1_conflict
+    assign m1_hit      = m1_en & ~m1_unc & ~m1_conflict & ~inval
                        & valid[m1_idx] & (tag[m1_idx] == m1_tag);
     assign m1_rdata    = data[m1_idx];
 
@@ -436,6 +452,10 @@ module DCache #(
                 tag[cpu_index_r]   <= cpu_tag_r;
                 data[cpu_index_r]  <= mem_rdata;
             end
+
+            // ---- 双核协同（第 2 步）：整表无效，**放在最后** ⇒ 与回填同拍时它赢 ----
+            //   实现上就是一条 256 位同步复位；不遍历、不加状态机（1 拍完成）。
+            if (inval) valid <= {LINES{1'b0}};
 
             // ---- store 命中时把数据合并进缓存行 ----
             //   ★ v13：合并挪到 store 的**请求拍**（原来在 store_req_r 那一拍，

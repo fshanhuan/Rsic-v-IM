@@ -112,7 +112,7 @@ file copy -force "$WORK/prog.hex" "$WORK/project_src/prog.hex"
 
 # board_top_ila.sv 等板级件：默认**不再**从仓库正本覆盖（见上面 SYNC_FROM_WSRC 的说明）
 if {$SYNC_FROM_WSRC} {
-    foreach f {board_top_ila.sv board_top.sv sync_mem.sv sync_mem_dp.sv reset_sync.sv} {
+    foreach f {board_top_ila.sv board_top.sv sync_mem.sv sync_mem_dp.sv soc_bus.sv reset_sync.sv} {
         file copy -force "$WSRC/board/$f" "$WORK/board/$f"
     }
     file mkdir "$WORK/rtl"
@@ -130,7 +130,7 @@ if {$SYNC_FROM_WSRC} {
             puts "==> 补缺失 RTL: [file tail $f]"
         }
     }
-    foreach f {board_top_ila.sv board_top.sv sync_mem.sv sync_mem_dp.sv reset_sync.sv} {
+    foreach f {board_top_ila.sv board_top.sv sync_mem.sv sync_mem_dp.sv soc_bus.sv reset_sync.sv} {
         set dst "$WORK/board/$f"
         if {![file exists $dst]} {
             file copy -force "$WSRC/board/$f" $dst
@@ -173,8 +173,9 @@ set RTL_SRC [list \
     "$SRC/ALU.sv" "$SRC/LSU.sv" "$SRC/DCache.sv" \
     "$SRC/WBU.sv" "$SRC/Data_hazard.sv" "$SRC/Control.sv" \
     "$SRC/add.sv" "$SRC/sext.sv" "$SRC/Reg.sv" \
-    "$SRC/MDU_pipelined.sv" \
+    "$SRC/MDU_pipelined.sv" "$SRC/plic_lite.sv" "$SRC/clint.sv" \
     "$WORK/board/sync_mem.sv" "$WORK/board/sync_mem_dp.sv" \
+    "$WORK/board/soc_bus.sv" \
     "$WORK/board/reset_sync.sv" \
     "$WORK/board/uart_rx.sv" "$WORK/board/boot_loader.sv" \
     "$WORK/board/uart_tx.sv" \

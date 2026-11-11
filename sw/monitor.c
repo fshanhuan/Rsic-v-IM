@@ -61,9 +61,22 @@
 extern char _etext[];
 #define IROM_APP_MIN ((uint32_t)((((uint32_t)_etext) + 0xFFFu) & ~0xFFFu))
 
+/* ★ A4：地址映射的单一来源是 rtl/soc_map.sv，由 tools/gen_soc_map.py 生成
+ *   sw/soc_map.h。这里做**编译期**一致性检查 —— 手写常量漂了，编译就报错，
+ *   而不是等上板才发现"读错地址"。 */
+#include "soc_map.h"
+_Static_assert(IROM_WIN == SOC_CODEWIN_BASE,
+               "IROM_WIN 与 soc_map.h 的 SOC_CODEWIN_BASE 不一致（请重跑 tools/gen_soc_map.py）");
+_Static_assert(DRAM_BASE == 0x00010000u,
+               "DRAM_BASE 必须仍是 0x1_0000（0x0_0000~0x0_FFFF 留给 ramdisk 空洞）");
+
 static const char hexd[] = "0123456789abcdef";
 
 /* ---------------------------------------------------------------- 输出 */
+static void rxq_push(uint8_t b);
+static void rxq_drain(void);
+static int  rxq_get(void);
+
 static void putc_(char c)
 {
     while (UART_TXSTAT & 1u)
@@ -103,21 +116,177 @@ static uint32_t rd_mtime(void)
     return v;
 }
 
-/* 非阻塞取一个字节；没有就返回 -1。★ 必须先看 RXSTAT.bit0。
+/* ------------------------------------------------------------ A2/S1：串口中断
+ * 改造前：只靠 getc_nb() 轮询 RXSTAT。RX FIFO 只有 **8 深** —— 115200 下 8 字节
+ *   只有 694 us 的余量，主循环在别处待久了（一次串口打印就是 52 ms）必然丢字节。
+ * 改造后：PLIC 源 0（RX FIFO 非空，**电平**）→ CSR.mip.MEIP → 本 ISR 把字节搬进
+ *   64 字节环形缓冲；getc_nb() 先取环，环空再退回轮询（两条路并存，向后兼容）。
+ *
+ * ★ 不变量 1：ISR 必须**一直抽到 FIFO 空**。源 0 是电平信号，只要还有字节没抽走，
+ *   退出 ISR 会立刻再进一次 —— 那不是"丢字节"，是中断风暴。
+ * ★ 不变量 2：环满时仍然要 pop（丢这个字节），否则 FIFO 永远非空、永远在中断。
+ * ★ 不变量 3：claim 要写 IRQPEND 的 bit0（写 1 清位），不是抽完就完事。
+ */
+#define UART_IRQPEND (*(volatile uint32_t *)0x10000020u)   /* A2：PLIC 待处理 / claim */
+#define UART_IRQEN   (*(volatile uint32_t *)0x10000024u)   /* A2：PLIC 使能位图      */
+
+#define RXQ_SIZE 64
+static volatile int      rx_irq_on;         /* 1 = 中断模式（getc_nb 不许碰 FIFO） */
+static volatile uint8_t  rxq[RXQ_SIZE];
+static volatile uint32_t rxq_w, rxq_r;      /* 写/读游标，自由增长，取模访问 */
+
+static void rxq_push(uint8_t b)
+{
+    uint32_t w = rxq_w;
+    if ((w - rxq_r) >= RXQ_SIZE)
+        return;                             /* 满：丢弃（FIFO 那边已经 pop 过了） */
+    rxq[w % RXQ_SIZE] = b;
+    rxq_w = w + 1u;
+}
+
+static int rxq_get(void)
+{
+    uint32_t r = rxq_r;
+    if (r == rxq_w)
+        return -1;
+    rxq_r = r + 1u;
+    return (int)rxq[r % RXQ_SIZE];
+}
+
+/* 把 RX FIFO 里现有的字节全部搬进环形缓冲（最多 32 个，防止在中断/打印里死循环） */
+static void rxq_drain(void)
+{
+    int n = 0;
+    while ((UART_RXSTAT & 1u) && (n++ < 32)) {
+        rxq_push((uint8_t)(UART_RX & 0xFFu));
+        UART_RXPOP = 1u;
+    }
+}
+
+/* ---------------- S2：软件断点（用 ebreak 打补丁，不需要改 RTL）----------------
+ * 思路（老式 debugger 的做法）：把目标地址那条指令换成 `ebreak`（0x00100073），
+ * 执行到那里就陷入；ISR 打印现场、把原指令写回去、mepc+=4 跳过错位，再返回。
+ *
+ * 约束（写清楚，免得误用）：
+ *   · 只能打在**可写的代码区**（IROM 窗口 0x2_xxxx，即 addr >= 0x4000 的应用区）；
+ *   · 只支持**一个**断点（够用，且省掉链表/数组的边界问题）；
+ *   · 打断点期间那一行不能被执行第二次（已还原；要重复命中就重新 bk 一次）。
+ */
+#define EBREAK_INSN 0x00100073u
+static uint32_t bk_addr;      /* 0 = 无断点 */
+static uint32_t bk_orig;
+
+/* 最近一次**同步异常**的现场（中断不算）。`i` 命令会打出来 —— 跑飞之后不用再猜。 */
+static volatile uint32_t exc_last_cause, exc_last_pc, exc_n;
+
+__attribute__((interrupt("machine"), aligned(4)))
+void trap_entry(void)
+{
+    uint32_t cause, epc;
+
+    __asm__ volatile("csrr %0, mcause" : "=r"(cause));
+    __asm__ volatile("csrr %0, mepc"   : "=r"(epc));
+
+    /* ★★ P0-1（S1 的最后一个洞）：**中断绝不能改 mepc**。
+     *
+     *   原来这里对所有陷入都做 `mepc += 4`，于是每一次串口接收中断都把"被打断的
+     *   那条指令"跳了过去。后果分两种：
+     *     · 真片上：偶尔少执行一条指令，命令解析时好时坏（一直以为"没规律"）；
+     *     · 仿真里：被跳过的是 `sw` 时，之后 `lw` 读到的是**从未写过的槽**；
+     *       tb 只清了 DRAM 低 16 K 字，高半段是 X → X 顺着寄存器流进地址/控制，
+     *       于是 debug_status 的低两位（dcache_hold / IFU_stall）变 X。
+     *       这就是"开 MIE 后停顿网络出现未定义值"的真正来源：不是 RTL 的 X，
+     *       是**软件跳了一条指令**之后读到了仿真未初始化的存储。
+     *
+     *   规范（特权手册 3.1.15）：中断的 mepc 指向被打断、之后要**续执行**的那条，
+     *   只有同步异常的 mepc 才是出错指令本身。所以中断分支直接返回。 */
+    if ((cause & 0x80000000u) != 0u) {
+        if ((cause & 0x1Fu) == 11u) {       /* MEI：PLIC 电平源必须 claim，否则立刻重入 */
+            while (UART_RXSTAT & 1u) {      /* 一直抽到 FIFO 空（不变量 1） */
+                rxq_push((uint8_t)(UART_RX & 0xFFu));
+                UART_RXPOP = 1u;
+            }
+            UART_IRQPEND = (1u << 0);       /* claim：清 pending（不变量 3） */
+        }
+        /* MTI(7) / MSI(0)：电平由 CLINT / 软件源自己维护，这里不 claim */
+        return;                             /* gcc 的 interrupt 属性会补 mret */
+    }
+
+    if (cause == 3u && bk_addr != 0u && epc == bk_addr) {
+        /* 断点命中：还原指令、跳过它，然后继续 */
+        *(volatile uint32_t *)(IROM_WIN + bk_addr) = bk_orig;
+        bk_addr = 0u;
+        __asm__ volatile("csrw mepc, %0" ::"r"(epc + 4u));
+        return;
+    }
+
+    /* 其它同步异常：记现场 + 跳过一条，避免死在原地 */
+    exc_last_cause = cause;
+    exc_last_pc    = epc;
+    exc_n          = exc_n + 1u;
+    __asm__ volatile("csrw mepc, %0" ::"r"(epc + 4u));
+}
+
+static void rx_flush(void)
+{
+    int n = 0;
+    while ((UART_RXSTAT & 1u) && (n++ < 128)) {
+        (void)UART_RX;
+        UART_RXPOP = 1u;
+    }
+    rxq_r = 0;
+    rxq_w = 0;
+}
+
+static void rx_irq_init(void)
+{
+    /* ★ 先把 FIFO 里**引导期残留的字节**冲掉，再开中断。
+     *   实测（真片）：不冲的话，第一条命令会变成 "k0 20000" —— 那个 '0' 是串口灌
+     *   镜像时 console 接收器吃进去的字节（引导期间 console FIFO 一直在监听同一条线），
+     *   开机后被 ISR 搬进环形缓冲，插在用户输入中间，命令就解析失败了。
+     *   冲洗放在开 MIE 之前，纯轮询做完，不需要中断参与。 */
+    {
+        int n = 0;
+        while ((UART_RXSTAT & 1u) && (n++ < 64)) {
+            (void)UART_RX;
+            UART_RXPOP = 1u;
+        }
+        rxq_r = 0;
+        rxq_w = 0;
+    }
+
+    __asm__ volatile("csrw mtvec, %0" ::"r"((uint32_t)(uintptr_t)&trap_entry));
+    rx_irq_on = 1;                          /* ★ 之后 getc_nb 只吃环形缓冲 */
+    UART_IRQEN = (1u << 0);                 /* 使能源 0：RX FIFO 非空 */
+    __asm__ volatile("csrs mie, %0"     ::"r"(1u << 11));   /* MEIE */
+    __asm__ volatile("csrs mstatus, %0" ::"r"(1u << 3));    /* MIE  */
+}
+
+/* 非阻塞取一个字节；没有就返回 -1。
  *
  * ★★ RXDATA 是**幂等读**，弹出要靠写 UART_RXPOP。
  *   为什么不能"读即弹"：一次 `lw 0x1000_0008` 曾经会让 perip_ren 出两个脉冲
  *   （DCache 的 uncacheable 读被重发，v14 已从 RTL 侧修掉，见 DCache.sv 的 2a 段），
  *   "读即弹"于是每读一个字节吃掉两个 —— 现象是 `l 3f` 被解析成 `l3`。
  *   写成 peek + 显式 pop 之后，读重复多少次都无害。
+ *
+ * ★ S1 关键修复：开了中断之后，**这个函数不许再碰 FIFO**。
+ *   真片实测症状是字节重复（`i` 变成 `i0`）和丢失（`l 3f` 里 `l` 没了）——
+ *   因为 ISR 在把 FIFO 往环形缓冲搬，而这里的"轮询回退"也在 peek+pop，
+ *   同一个 FIFO 有了**两个消费者**，互相抢字节。开中断时这里只吃环形缓冲。
  */
 static int getc_nb(void)
 {
-    int c;
+    int c = rxq_get();                      /* 先吃中断搬进来的那批 */
+    if (c >= 0)
+        return c;
+    if (rx_irq_on)
+        return -1;                          /* ★ 中断模式下绝不去碰 FIFO */
+    /* 未开中断：退回轮询（老镜像/单元测试） */
     if ((UART_RXSTAT & 1u) == 0u)
         return -1;
     c = (int)(UART_RX & 0xFFu);
-    UART_RXPOP = 1u;              /* 显式弹出（写是单拍的） */
+    UART_RXPOP = 1u;                        /* 显式弹出（写是单拍的） */
     return c;
 }
 
@@ -223,6 +392,14 @@ static void c_info(int argc, char **argv);
 static void c_echo(int argc, char **argv);
 static void c_boot(int argc, char **argv);
 static void c_run(int argc, char **argv);
+static void c_bk(int argc, char **argv);
+static void c_bd(int argc, char **argv);
+static void c_bl(int argc, char **argv);
+static void c_ls(int argc, char **argv);
+static void c_df(int argc, char **argv);
+static void c_sa(int argc, char **argv);
+static void c_rm(int argc, char **argv);
+static void c_runf(int argc, char **argv);
 static void c_load(int argc, char **argv);
 static void c_data(int argc, char **argv);
 
@@ -259,8 +436,15 @@ static const cmd_t cmds[] = {
     { "echo",   c_echo,   0 },
     { "b",      c_boot,   "b            re-enter boot loader" },
     { "boot",   c_boot,   0 },
-    { "r",      c_run,    "r <a>        run code just stored in IROM (a = word addr)" },
-    { "run",    c_run,    0 },
+    { "r",      c_run,    "r <a>        run raw code at irom addr (a = word addr)" },
+    { "bk",     c_bk,     "bk <a>       set breakpoint at irom addr (>= IROM_APP_MIN)" },
+    { "bd",     c_bd,     "bd           delete the breakpoint" },
+    { "bl",     c_bl,     "bl           list the breakpoint" },
+    { "ls",     c_ls,     "ls           list ramdisk files" },
+    { "df",     c_df,     "df           free space on the ramdisk" },
+    { "sa",     c_sa,     "sa <n> <a> <l>  save memory[a..a+l) as file n" },
+    { "rm",     c_rm,     "rm <n>       delete file n" },
+    { "run",    c_runf,   "run <n>      load file n to 0x4000 and execute" },
     { "L",      c_load,   "L <a>        load hex words into IROM window from UART" },
     { "load",   c_load,   0 },
     { "D",      c_data,   "D <a>        load hex words to DRAM/RAM (8 hex/word)" },
@@ -435,6 +619,12 @@ static void c_info(int argc, char **argv)
     puts_("  DRAM=128KB@0x0  .text@IROM  .data/.stack@0x1_0000\n");
     puts_("  MMIO @0x1000_0000: tx/rx/led/bootreq/rxpop\n");
     puts_("  D-cache 256x1w  BTB/PHT 256  GHR 8  RAS 8\n");
+    /* P0-1：中断已默认开启，顺手把"最近一次同步异常"的现场打出来 */
+    puts_("  rx irq ");
+    puts_(rx_irq_on ? "ON" : "off(poll)");
+    puts_("   exc n="); putdec_(exc_n);
+    puts_(" last="); puthex8(exc_last_cause);
+    puts_(" @0x"); puthex8(exc_last_pc); putc_('\n');
 }
 
 static void c_echo(int argc, char **argv)
@@ -593,7 +783,6 @@ static void c_run(int argc, char **argv)
         return;
     }
     /* 取指地址与窗口地址是同一块 IROM 的同一个字 ⇒ 直接把 a 当函数指针。
-    /* 取指地址与窗口地址是同一块 IROM 的同一个字 ⇒ 直接把 a 当函数指针。
      * ★ fence.i：让取指看到刚写进来的那几行（本核无 I-Cache，但取指队列是 4 项，
      *   刚写完就跳过去时要保证队列里不是旧字）。
      * ★ v16 更正：早先以为"fence.i 会让 CPU 停住"是**误判** —— 真凶是测试台把命令
@@ -643,12 +832,364 @@ static void print_prompt(void)
     puts_("> ");
 }
 
+/* ------------------------------------------------------------ P1：ramdisk FS
+ * 区域：DRAM 0x0000_0000 – 0x0000_9FFF（40 KB）。`link.ld` 里本来就留空
+ *   （0x1_0000 以上才是 shell 的 .data/.bss/栈），所以拿来做 ramdisk 不占程序空间。
+ *
+ * ★ DRAM 三段划分（128 KB 全用上，见 sw/app/link_app.ld，**两边必须一致**）：
+ *   0x0_0000 – 0x0_9FFF  文件系统 40 KB（160 块 × 256 B）      ← 本文件
+ *   0x0_A000 – 0x0_FFFF  应用数据区 24 KB（.rodata/.data/.bss + 应用私有栈）
+ *   0x1_0000 – 0x1_FFFF  shell 自己的 .rodata/.data/.bss/栈
+ *   应用要是把自己的变量放到 0x1_0000，写的就是 shell 的命令表 —— 所以 `run`
+ *   只允许把数据装进 0xA000~0xFFFF，越界直接拒绝（初版不检查，正是 P1-1 失败的
+ *   原因之一）。
+ *
+ * 布局（块 256 B × 160 块）：
+ *   块 0     超级块：magic 'BFSS' / nfiles
+ *   块 1..3  目录表：48 项 × 16 B？→ 这里用 32 项 × 24 B = 768 B，正好 3 块
+ *   块 4     位图：256 位 = 32 B
+ *   块 5..   数据区（**位图分配，可回收**）
+ *
+ * 与 sw/fstest.c 的区别：那里是 bump 分配（删了不回收），这里是位图 + 连续分配，
+ * `rm` 之后 `df` 会真的变多 —— 这就是 P1-2 要的空间回收。
+ */
+#define FS_BLK    256u
+#define FS_NBLK   160u          /* 160 × 256 B = 40 KB = DRAM 0x0~0x9FFF */
+#define FS_DIRMAX 32u
+#define FS_MAGIC  0x53534642u
+
+typedef struct {
+    char     name[16];
+    uint16_t start;
+    uint16_t nblk;
+    uint32_t size;
+} fent_t;                       /* 24 B */
+
+static volatile uint32_t fs_base = 0u;      /* 不能用 (uint8_t*)0 常量，见 fstest.c */
+#define fsdisk ((uint8_t *)fs_base)
+#define fssb   ((uint32_t *)fs_base)
+#define fsdir  ((fent_t *)(fs_base + FS_BLK))
+#define fsmap  ((uint8_t *)(fs_base + 4u * FS_BLK))
+
+static int  fs_up;                          /* 1 = 已挂载 */
+
+static void fs_mount(void)
+{
+    uint32_t i;
+    if (fssb[0] != FS_MAGIC) {
+        for (i = 0; i < (FS_BLK / 4u); i++) fssb[i] = 0;
+        fssb[0] = FS_MAGIC;
+        fssb[1] = 0;                        /* nfiles */
+        for (i = 0; i < 32u; i++) fsmap[i] = 0;
+        for (i = 0; i < FS_DIRMAX; i++) fsdir[i].name[0] = '\0';
+        /* 0..4 已被元数据占用 */
+        for (i = 0; i < 5u; i++) fsmap[i >> 3] |= (uint8_t)(1u << (i & 7u));
+    }
+    fs_up = 1;
+}
+
+static int fs_used(uint32_t b) { return (fsmap[b >> 3] >> (b & 7u)) & 1u; }
+static void fs_mark(uint32_t b, int v)
+{
+    if (v) fsmap[b >> 3] |=  (uint8_t)(1u << (b & 7u));
+    else   fsmap[b >> 3] &= (uint8_t)~(1u << (b & 7u));
+}
+
+static uint32_t fs_free_blocks(void)
+{
+    uint32_t b, n = 0;
+    for (b = 5u; b < FS_NBLK; b++) if (!fs_used(b)) n++;
+    return n;
+}
+
+/* 找 n 个连续空闲块；成功则标记占用并返回起始块，失败返回 0 */
+static uint32_t fs_alloc(uint32_t n)
+{
+    uint32_t b, run = 0, st = 0;
+    for (b = 5u; b < FS_NBLK; b++) {
+        if (!fs_used(b)) {
+            if (run == 0u) st = b;
+            run++;
+            if (run == n) {
+                for (; st <= b; st++) fs_mark(st, 1);
+                return b - n + 1u;
+            }
+        } else {
+            run = 0u;
+        }
+    }
+    return 0u;
+}
+
+static fent_t *fs_find(const char *name)
+{
+    uint32_t i;
+    for (i = 0; i < FS_DIRMAX; i++)
+        if (fsdir[i].name[0] && streq(fsdir[i].name, name)) return &fsdir[i];
+    return (fent_t *)0;
+}
+
+static int fs_create(const char *name, const uint8_t *data, uint32_t size)
+{
+    uint32_t i, nb, st;
+    fent_t *e = (fent_t *)0;
+
+    if (!fs_up) fs_mount();
+    if (size == 0u) return -4;
+    if (fs_find(name)) return -1;                 /* 重名 */
+    for (i = 0; i < FS_DIRMAX; i++) if (!fsdir[i].name[0]) { e = &fsdir[i]; break; }
+    if (!e) return -2;                            /* 目录满 */
+    nb = (size + FS_BLK - 1u) / FS_BLK;
+    st = fs_alloc(nb);
+    if (st == 0u) return -3;                      /* 空间不足 */
+    for (i = 0; i < size; i++) fsdisk[st * FS_BLK + i] = data[i];
+    for (i = 0; i < 15u && name[i]; i++) e->name[i] = name[i];
+    e->name[i] = '\0';
+    e->start = (uint16_t)st;
+    e->nblk  = (uint16_t)nb;
+    e->size  = size;
+    fssb[1] = fssb[1] + 1u;
+    return 0;
+}
+
+static int fs_remove(const char *name)
+{
+    fent_t *e = fs_find(name);
+    uint32_t b;
+    if (!e) return -1;
+    for (b = e->start; b < (uint32_t)e->start + e->nblk; b++) fs_mark(b, 0);
+    e->name[0] = '\0';
+    fssb[1] = fssb[1] - 1u;
+    return 0;
+}
+
+
+static void c_bk(int argc, char **argv)
+{
+    uint32_t a;
+    char *p;
+    if (argc < 2) { puts_("usage: bk <irom_addr>\n"); return; }
+    p = argv[1];
+    if (!parse_num(&p, &a)) { puts_("usage: bk <irom_addr>\n"); return; }
+    if ((a & 3u) != 0u) { puts_(" must be word-aligned\n"); return; }
+    if (a < IROM_APP_MIN) { puts_(" refuse: below shell text end\n"); return; }
+    if (bk_addr != 0u) *(volatile uint32_t *)(IROM_WIN + bk_addr) = bk_orig;
+    bk_orig = *(volatile uint32_t *)(IROM_WIN + a);
+    *(volatile uint32_t *)(IROM_WIN + a) = EBREAK_INSN;
+    __asm__ volatile(".word 0x0000100f" ::: "memory");
+    bk_addr = a;
+    puts_(" breakpoint @0x"); puthex8(a); puts_("  (was 0x"); puthex8(bk_orig); puts_(")\n");
+}
+
+static void c_bd(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (bk_addr == 0u) { puts_(" no breakpoint\n"); return; }
+    *(volatile uint32_t *)(IROM_WIN + bk_addr) = bk_orig;
+    __asm__ volatile(".word 0x0000100f" ::: "memory");
+    puts_(" cleared 0x"); puthex8(bk_addr); putc_('\n');
+    bk_addr = 0u;
+}
+
+static void c_bl(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (bk_addr == 0u) { puts_(" no breakpoint\n"); return; }
+    puts_(" 0x"); puthex8(bk_addr);
+    puts_("  orig=0x"); puthex8(bk_orig); putc_('\n');
+}
+
+/* ------------------------------------------------------------ P1：FS 命令 */
+
+static void c_ls(int argc, char **argv)
+{
+    uint32_t i, n = 0;
+    (void)argc; (void)argv;
+    if (!fs_up) fs_mount();
+    for (i = 0; i < FS_DIRMAX; i++) {
+        if (!fsdir[i].name[0]) continue;
+        puts_("  "); puts_(fsdir[i].name);
+        puts_("   "); putdec_(fsdir[i].size); puts_(" B");
+        puts_("  @blk "); putdec_(fsdir[i].start); putc_('\n');
+        n++;
+    }
+    puts_(" "); putdec_(n); puts_(" file(s), ");
+    putdec_(fs_free_blocks()); puts_(" free blocks (256 B each)\n");
+}
+
+static void c_df(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (!fs_up) fs_mount();
+    puts_(" free "); putdec_(fs_free_blocks()); puts_(" / "); putdec_(FS_NBLK);
+    puts_(" blocks = "); putdec_(fs_free_blocks() * FS_BLK / 1024u); puts_(" KB\n");
+}
+
+/* sa <name> <addr> <bytes> —— 把内存里的一段存成文件 */
+static void c_sa(int argc, char **argv)
+{
+    uint32_t a, n;
+    char *p;
+    int r;
+    if (argc < 4) { puts_("usage: sa <name> <addr> <bytes>\n"); return; }
+    p = argv[2]; if (!parse_num(&p, &a)) { puts_(" bad addr\n"); return; }
+    p = argv[3]; if (!parse_num(&p, &n)) { puts_(" bad len\n"); return; }
+    if (!fs_up) fs_mount();
+    r = fs_create(argv[1], (const uint8_t *)a, n);
+    if (r == 0)            { puts_(" saved "); putdec_(n); puts_(" B as "); puts_(argv[1]); putc_('\n'); }
+    else if (r == -1)      puts_(" refuse: name exists\n");
+    else if (r == -2)      puts_(" refuse: directory full\n");
+    else if (r == -3)      puts_(" refuse: no space\n");
+    else                   puts_(" refuse: bad length\n");
+}
+
+static void c_rm(int argc, char **argv)
+{
+    if (argc < 2) { puts_("usage: rm <name>\n"); return; }
+    if (!fs_up) fs_mount();
+    if (fs_remove(argv[1]) == 0) puts_(" removed\n");
+    else                        puts_(" no such file\n");
+}
+
+/* ------------------------------------------------------------ P1-1：run
+ * run <name> [entry] —— 从文件系统把应用装进板子并执行
+ *
+ * 两种镜像都认：
+ *   ① **容器**（sw/mkapp.py 生成；推荐）：32 B 头 + 代码 + 数据
+ *        0  magic 'BAPP'  4 irom_base  8 irom_len  12 dram_base
+ *        16 dram_len      20 entry     24 sum      28 hdr_words(=8)
+ *      一条命令完成"装代码 + 装数据 + 跳入口"，而且带校验和 —— 串口丢一个字节
+ *      会当场报错，而不是跑飞之后让人猜。
+ *   ② 裸镜像（没有头）：整段当代码装到 APP_EXEC，兼容老用法 `L`+`sa`。
+ *
+ * ★ 为什么数据必须落在 0xA000~0xFFFF：0x1_0000 以上是 shell 自己的 .data/.bss，
+ *   应用写进去就是破坏 shell 的命令表（P1-1 第一次上板失败的直接原因）。
+ * ★ 为什么用**字**拷贝而不是逐字节：IROM 窗口的写通路是整套字的写使能，
+ *   逐字节 store 会变成"读-改-写整字"，容易踩到没有意义的中间值。
+ */
+#define APP_EXEC  0x00006000u           /* 代码基址（= shell text 端 4KB 对齐） */
+#define APP_DATA  0x0000A000u           /* 应用数据区基址（见 link_app.ld） */
+#define APP_MAGIC 0x50504142u           /* 'BAPP' */
+
+static uint32_t ld32(const volatile uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* 从 src 取一个字；不足 4 字节的部分补 0（只有镜像尾巴会用到） */
+static uint32_t getw(const volatile uint8_t *src, uint32_t avail)
+{
+    uint32_t w = 0u, k;
+    for (k = 0; k < 4u; k++)
+        if (k < avail) w |= (uint32_t)src[k] << (8u * k);
+    return w;
+}
+
+/* 把 n 字节按字写到绝对地址 dst（dst 必须 4 对齐） */
+static void copy_words(uint32_t dst, const volatile uint8_t *src, uint32_t n)
+{
+    uint32_t i;
+    for (i = 0; i < n; i += 4u)
+        *(volatile uint32_t *)(dst + i) = getw(src + i, n - i);
+}
+
+static void c_runf(int argc, char **argv)
+{
+    fent_t *e;
+    uint32_t i, cbase, clen, dbase = 0u, dlen = 0u, ent, sum, bad;
+    const volatile uint8_t *img;
+
+    if (argc < 2) { puts_("usage: run <name> [entry]\n"); return; }
+    if (!fs_up) fs_mount();
+    e = fs_find(argv[1]);
+    if (!e) { puts_(" no such file\n"); return; }
+    if (e->size < 8u) { puts_(" bad size\n"); return; }
+    img = (const volatile uint8_t *)(fsdisk + e->start * FS_BLK);
+
+    if (ld32(img) == APP_MAGIC) {
+        if (ld32(img + 28) != 8u) { puts_(" bad container header\n"); return; }
+        cbase = ld32(img + 4);
+        clen  = ld32(img + 8);
+        dbase = ld32(img + 12);
+        dlen  = ld32(img + 16);
+        ent   = ld32(img + 20);
+        sum   = ld32(img + 24);
+        if (32u + clen + dlen > e->size) { puts_(" container truncated\n"); return; }
+        if (cbase < IROM_APP_MIN || cbase >= 0x00010000u ||
+            clen > (0x00010000u - cbase)) {
+            puts_(" refuse: code must land in 0x"); puthex8(IROM_APP_MIN);
+            puts_("..0xFFFF\n"); return;
+        }
+        if (dlen != 0u &&
+            (dbase < APP_DATA || dbase >= 0x00010000u ||
+             dlen > (0x00010000u - dbase))) {
+            puts_(" refuse: data must land in 0x"); puthex8(APP_DATA);
+            puts_("..0xFFFF\n"); return;
+        }
+        bad = 0u;
+        for (i = 0; i < clen + dlen; i++) bad += img[32u + i];
+        if (bad != sum) {
+            puts_(" checksum 0x"); puthex8(bad);
+            puts_(" != 0x"); puthex8(sum); puts_(" (re-send the file)\n");
+            return;
+        }
+        copy_words(IROM_WIN + cbase, img + 32u, clen);
+        if (dlen != 0u) copy_words(dbase, img + 32u + clen, dlen);
+    } else {
+        cbase = APP_EXEC;
+        clen  = e->size;
+        ent   = APP_EXEC;
+        if (cbase < IROM_APP_MIN) {
+            puts_(" refuse: app base below shell text end\n"); return;
+        }
+        if (clen > (0x00010000u - cbase)) { puts_(" bad size\n"); return; }
+        copy_words(IROM_WIN + cbase, img, clen);
+        puts_(" (raw image, no header)\n");
+    }
+
+    __asm__ volatile(".word 0x0000100f" ::: "memory");     /* fence.i */
+
+    if (argc >= 3) { char *q = argv[2]; if (parse_num(&q, &ent)) { } }
+    puts_(" run "); puts_(e->name); puts_(" @0x"); puthex8(ent);
+    puts_("  code "); putdec_(clen);
+    if (dlen != 0u) { puts_("B + data "); putdec_(dlen); }
+    puts_("B\n");
+    ((void (*)(void))ent)();                               /* 应用返回后继续 */
+    puts_(" returned to shell\n");
+}
+
 int main(void)
 {
     int len = 0;
     int c;
     int swallow_lf = 0;
     int hi = 0;                     /* 历史游标：0 = 最新（空行） */
+
+    /* ★★ P0-1：串口接收**默认走中断**了（2026-11-10）。
+     *
+     *   "开 MIE 后命令解析全坏 / debug_status 低两位变 X" 的两个真实原因，都修了：
+     *     ① 两个消费者抢同一个 RX FIFO（isr 在搬、getc_nb 又在 peek+pop）
+     *        → 中断模式下 getc_nb 只吃环形缓冲（见它的注释）；
+     *     ② 陷入处理对**中断**也做 mepc+=4（见 trap_entry 的注释）
+     *        → 每次接收中断都会跳过一条被打断的指令，栈上的 sw 被跳过之后 lw 就读到
+     *          仿真里未初始化的 X，看起来像"停顿网络出现 X"。
+     *
+     *   现在中断是默认路径；要退回纯轮询（排查用）就编译时加 -DRX_IRQ_DISABLE。 */
+
+    /* ★ P0-3：清掉引导期残留的接收字节 —— 必须在**横幅之前、开中断之前**。
+     *   残留来源：灌镜像时 console 的 uart_rx 一直在监听同一条线，把引导帧的字节
+     *   也收进了自己的 FIFO；开机后它们会插在用户输入中间（`i` 变 `i0`、`k 20000`
+     *   变 `k0 20000`）。
+     *   ★ 为什么不再放在横幅之后：横幅要打 10 ms，这期间到达的字节是**用户输入**
+     *     （或测试台提前发的命令），冲掉它就会丢第一条命令。仿真里 tb_monitor 正是
+     *     在 1 ms 就把 `l 3f` 塞进 FIFO 的 —— 以前能过只是因为那时根本没调这个函数。 */
+    rx_flush();
+
+#ifndef RX_IRQ_DISABLE
+    rx_irq_init();
+#endif
+
 
 
     /* 启动横幅：只打"这是新程序 + 跑了多久 + 怎么求助"三行。

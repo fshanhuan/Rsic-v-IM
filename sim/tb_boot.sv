@@ -242,15 +242,15 @@ module tb_boot;
         // ★ DRAM 帧落地检查：数据必须出现在基址 0x1_0000（字偏移 0x4000），
         //   且**不能**出现在字 0（那是低 64KB 空洞）。
         $display(" u_ok : dram[0x4000]=%h  dram[0]=%h  (期望 DEADBEEF / 00000000)",
-                 u_ok.dram_inst.mem_ram[32'h4000], u_ok.dram_inst.mem_ram[0]);
+                 u_ok.g_dram_single.dram_inst.mem_ram[32'h4000], u_ok.g_dram_single.dram_inst.mem_ram[0]);
         $display("-------------------------------------------------");
 
         if (!ok_ok)        $display(" FAIL: u_ok 没有校验通过（boot_ok=0）");
         if (!ok_got_x10)   $display(" FAIL: u_ok 没跑到新程序的 addi x10,42");
         if (!ok_got_x11)   $display(" FAIL: u_ok 没跑到新程序的 addi x11,99");
-        if (u_ok.dram_inst.mem_ram[32'h4000] !== DRAM_MAGIC_WORD)
+        if (u_ok.g_dram_single.dram_inst.mem_ram[32'h4000] !== DRAM_MAGIC_WORD)
             $display(" FAIL: DRAM 帧没有落到基址 0x1_0000（字偏移 0x4000）");
-        if (u_ok.dram_inst.mem_ram[0] !== 32'h0)
+        if (u_ok.g_dram_single.dram_inst.mem_ram[0] !== 32'h0)
             $display(" FAIL: DRAM 帧错误地写了字 0（低 64KB 空洞）");
         if (ok_busy)       $display(" FAIL: u_ok 成功后 busy 没有释放");
         if (bad_ok)        $display(" FAIL: u_bad 校验和错却报了 ok=1");

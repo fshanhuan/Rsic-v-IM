@@ -1,4 +1,5 @@
 `include "para.sv"
+`include "soc_map.sv"
 `timescale 1ns / 1ps
 
 /* =============================================================================
@@ -41,6 +42,9 @@ module board_top #(
     // ★ v12（A）：串口引导开关。
     //   0 = 保持 v11 的行为：IROM 是**只读** BRAM，程序在综合时固化（改程序要重跑 33min）；
     //   1 = IROM 变**可写**，由 boot_loader 经 uart_rx 灌入镜像（改程序 ~1 s）。
+    //   2 = （双核协同第 1 步）**不要引导器**：IROM 固化一个几百字节的 stage-0 stub，
+    //       主镜像由 AXI 主机（PS）灌进 DRAM，CPU 被 ps_hold 按住直到 PS 放行，
+    //       然后 stub 把 DRAM → 代码窗口搬完再跳过去。见 board/ps_ctrl.sv。
     //   ★ 不动这条默认值，已冻结的 v11 ILA 构建的网表就完全不变。
     parameter IROM_BOOT  = 0,
     // 引导超时（ms）：复位后等 magic 的窗口 / 帧内字节间隔。
@@ -54,7 +58,17 @@ module board_top #(
     // ★ v13.3（P1）：帧首静默门限（ms）—— 线路必须静默这么久，magic 才被当命令。
     //   宿主的帧间空隙（load_uart.ps1 -FrameGapMs，默认 50 ms）必须明显大于它。
     //   0 = 关闭（老协议行为）。
-    parameter BOOT_SILENCE_MS = 1
+    parameter BOOT_SILENCE_MS = 1,
+    /* #6: AXI4-Lite host port switch.
+     *   0 (default) = byte-identical to v18: single-port DRAM, no AXI logic.
+     *   1 = DRAM becomes board/dram_shared.sv (CPU keeps its own read/write port;
+     *       the AXI host *borrows* the port in cycles when the CPU is idle), plus
+     *       board/axil_slave.sv. PS / any AXI master can then read and write the
+     *       128 KB, without ever stalling the CPU.
+     * NOTE: this uses a plain 32-bit array (NOT a true-dual-port byte-lane array),
+     *       because Vivado cannot infer BRAM for the latter (Synth 8-3391) and
+     *       xvlog needs >400 s to compile it. See docs/AXI_总线化_6_7.md. */
+    parameter AXIL_EN = 0
 ) (
     input  logic        sys_clk,
     input  logic        btn_rst_n,     // 板卡按键复位，低有效（建议先消抖）
@@ -113,11 +127,64 @@ module board_top #(
     (* keep = "true" *) output logic [6:0]  led,
     (* keep = "true" *) output logic        debug_boot_busy,  // 1 = 正在灌镜像，CPU 被复位按住
     (* keep = "true" *) output logic        debug_boot_ok,    // 1 = 镜像完整且校验通过
-    (* keep = "true" *) output logic        debug_boot_err    // 1 = 校验失败/长度非法/超时
+    (* keep = "true" *) output logic        debug_boot_err,   // 1 = 校验失败/长度非法/超时
+
+    /* ---- 双核协同（第 3 步）：CPU → PS 中断 ----
+     * 电平语义，由 MMIO 0x1000_001C bit1 驱动；PS 设计里接到 Zynq 的 IRQ_F2P。
+     * ★ 为什么是电平不是脉冲：GIC 的 SPI 是电平敏感，脉冲要在 PS 侧自己锁存，
+     *   反而多一层状态。CPU 侧"置 1 → 等 PS 处理 → 清 0"，就是标准的生产者语义。
+     * AXIL_EN=0 时照样被驱动（悬空无害），这样 TB 也能观察它。 */
+    (* keep = "true" *) output logic        irq_ps,
+
+    /* ---- #6: AXI4-Lite slave port (only functional when AXIL_EN=1) ----
+     * Standard s_axil_* naming so it can be connected to an Xilinx Interconnect / PS
+     * directly. When AXIL_EN=0 all outputs are tied off and the inputs are ignored.
+     * The bridge and the memory run on the SAME clock (no CDC): in the PS design
+     * both sys_clk and axil_aclk are driven by FCLK_CLK0. */
+    input  logic        axil_aclk,
+    input  logic        axil_aresetn,
+    input  logic [31:0] s_axil_awaddr,
+    input  logic [2:0]  s_axil_awprot,
+    input  logic        s_axil_awvalid,
+    output logic        s_axil_awready,
+    input  logic [31:0] s_axil_wdata,
+    input  logic [3:0]  s_axil_wstrb,
+    input  logic        s_axil_wvalid,
+    output logic        s_axil_wready,
+    output logic [1:0]  s_axil_bresp,
+    output logic        s_axil_bvalid,
+    input  logic        s_axil_bready,
+    input  logic [31:0] s_axil_araddr,
+    input  logic [2:0]  s_axil_arprot,
+    input  logic        s_axil_arvalid,
+    output logic        s_axil_arready,
+    output logic [31:0] s_axil_rdata,
+    output logic [1:0]  s_axil_rresp,
+    output logic        s_axil_rvalid,
+    input  logic        s_axil_rready
 );
 
     /* ---------------- 1) 复位：异步置位、同步释放 ---------------- */
     logic cpu_rst;
+    /* ★ P0-4（lint）：cpu_rst_eff 在 232 行（CPU 例化）就用到了，原来声明在 305 行 ——
+     *   靠隐式网络规则"先造一根 1 bit 隐式线"，xvlog 报 VRFC 10-2938。提到这里。 */
+    logic cpu_rst_eff;
+
+    /* ---------------- 1b) 双核协同的控制面（第 1/2/3 步） ----------------
+     * ps_hold       ：AXI 主机（PS）把 CPU 按在复位里，等镜像灌完
+     * ps_irq_to_cpu ：PS → CPU 的电平中断（PLIC 源 4）
+     * irq_ps_r      ：CPU → PS 的电平中断（MMIO 0x1000_001C bit1）
+     * cpu_alive_r   ：stage-0 stub 报过到（写 MMIO 0x1000_001C bit2）
+     * dcache_inval  ：MMIO 0x1000_001C bit0 的一拍脉冲 → DCache 整表无效
+     * ★ AXIL_EN=0 时 ps_hold / ps_irq_to_cpu 由 generate 的 else 支钉成 0，
+     *   行为与 v18 逐位相同（网表里这几个信号被常量折叠掉）。 */
+    logic ps_hold;
+    logic ps_irq_to_cpu;
+    logic irq_ps_r;
+    logic cpu_alive_r;
+    logic dcache_inval;
+    logic alive_clr;
+    logic irq_ps_clr;
 
     reset_sync reset_sync_inst (
         .clk         (sys_clk),
@@ -148,25 +215,95 @@ module board_top #(
      *   否则一次 `sw 0x2_0040` 会同时改掉 DRAM 第 0x40 个字。
      * 代价：BRAM 数量不变（BRAM36 本来就是双口），只多一级译码 + 一条读数据 mux。 */
     logic [31:0] irom_d_rdata;      // IROM 第二读口（数据侧）返回
-    logic        irom_win_sel;      // 本次数据访问落在 IROM 窗口
-    assign irom_win_sel = (perip_addr[31:16] == 16'h0002);
+    logic [31:0] dram_rdata;        // DRAM 读值（原来的声明在 MMIO 段，A1 提前）
+    logic [31:0] mmio_rdata;        // 外设寄存器读值（下面那个小 case）
+
+    /* ---- A1：系统总线的片选/使能（全部来自 board/soc_bus.sv）----
+     * 改造前 `irom_win_sel` 与 `mmio_sel` 是两处手写比较，DRAM 的写使能还要
+     * 再"减掉"它们（`perip_wen & ~mmio_sel & ~irom_win_sel`）。现在这三件事
+     * 全在 soc_bus 里，加外设不用再改这里。 */
+    logic        bus_hit_dram, bus_hit_code, bus_hit_mmio;
+    logic [ 3:0] bus_mmio_idx;
+    logic        bus_re_dram, bus_re_code;
+    logic        bus_we_dram, bus_we_code, bus_we_mmio;
+    logic        bus_unmapped;
 
     logic [31:0] perip_addr;
     logic        perip_wen;
     logic [ 1:0] perip_mask;
     logic [31:0] perip_wdata;
     logic [31:0] perip_rdata;
-    logic        perip_en;
     logic        perip_ren;
+
+    /* ---------------- 2b) A1：系统总线实例 ----------------
+     * 译码口径见 rtl/soc_map.sv（地址表的单一来源）与 board/soc_bus.sv（契约）。
+     * ★ 时序不变量：这里**没有**加任何一级寄存器，也没有引入等待态 ——
+     *   请求拍给地址、下一拍数据有效，与改造前逐位相同（WNS 已只剩 0.048 ns）。
+     * ------------------------------------------------------------------- */
+    soc_bus #(
+        .STRICT_DECODE (1'b0)          // 0 = 与改造前逐位兼容（DRAM 为默认从设备）
+    ) soc_bus_inst (
+        .ren        (perip_ren),
+        .wen        (perip_wen),
+        .addr       (perip_addr),
+        .wdata      (perip_wdata),
+        .mask       (perip_mask),
+        .dram_rdata (dram_rdata),
+        .code_rdata (irom_d_rdata),
+        .mmio_rdata (mmio_rdata),
+        .rdata      (perip_rdata),
+        .hit_dram   (bus_hit_dram),
+        .hit_code   (bus_hit_code),
+        .hit_mmio   (bus_hit_mmio),
+        .mmio_idx   (bus_mmio_idx),
+        .re_dram    (bus_re_dram),
+        .re_code    (bus_re_code),
+        .we_dram    (bus_we_dram),
+        .we_code    (bus_we_code),
+        .we_mmio    (bus_we_mmio),
+        .unmapped   (bus_unmapped)
+    );
 
     // v12（B）：myCPU 侧的状态字（只驱动低 8 位）+ 拍计数器
     logic [31:0] debug_status_cpu;
+
+    /* ---------------- 2c) A2：PLIC-lite（外部中断） ----------------
+     * 改造前 CSR 把 meip 硬连 0，全核只有 mtime 一个中断源。现在把"谁在请求中断"
+     * 交给一个 8 源的小控制器，CPU 的 mip.MEIP 直接吃它的汇总输出。
+     *
+     * 源分配（编号见 rtl/soc_map.sv）：
+     *   [0] UART RX FIFO 非空（电平）—— 这条是"按方向键丢键"的根治
+     *   [1] UART RX 溢出（电平）
+     *   [2] 定时器（A3 接 CLINT，现在先接 0）
+     *   [3] 软件自触发（写 0x1000_002C，一次脉冲）
+     * ★ 为什么是电平不是边沿：FIFO 非空是电平。用边沿置位 + claim 清位，会在两个
+     *   字节之间出现"数据还在但 pending 已被清"的窗口，那个字节再也不会触发中断。
+     * ------------------------------------------------------------------- */
+    logic [7:0] plic_src;
+    logic [7:0] plic_pend, plic_en, plic_clr;
+    logic        plic_irq;
+    logic [3:0] plic_best;
+    logic       irq_sw_pulse;
+    // A3：CLINT 读值（计数器在 myCPU 内，这里只拿来回 MMIO 读 mux）
+    logic [31:0] clint_mtime, clint_mtimecmp;
+
+    /* 说明：plc_lite 的例化放在下面"console RX FIFO"之后 —— 它的两个中断源
+     * （rx_avail / rx_ovf）在那里才声明。这里只声明信号。 */
 
     myCPU u_cpu (
         .cpu_clk            (sys_clk),
         // ★ v12：用 cpu_rst_eff（= cpu_rst | boot_busy）。IROM_BOOT=0 时它就是 cpu_rst，
         //   与 v11 完全等价；IROM_BOOT=1 时引导期间 CPU 被按住，IROM 口由 loader 独占。
         .cpu_rst            (cpu_rst_eff),
+        .ext_irq            (plic_irq),          // A2
+        .dcache_inval       (dcache_inval),      // 双核协同第 2 步：MMIO 0x1000_001C bit0
+
+        // ---- A3：CLINT 总线侧（计数器在核内，这里只做 MMIO 译码）----
+        .mm_mtime_we        (bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_MTIME)),
+        .mm_mtimecmp_we     (bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_MTIMECMP)),
+        .mm_wdata           (perip_wdata),
+        .clint_mtime        (clint_mtime),
+        .clint_mtimecmp     (clint_mtimecmp),
 
         .irom_addr          (irom_addr),
         .irom_data          (irom_data),
@@ -219,7 +356,9 @@ module board_top #(
     //     Error (12153): Can't elaborate top-level user hierarchy
     //   → Analysis & Synthesis 失败，fit/时序/上板全部跑不起来。
     //   细节：syn/修复史_全量.md §BOARDTOP-1
-    assign perip_en = perip_ren;
+    // ★ A1：原来的 `assign perip_en = perip_ren;` 已删除 —— 总线上不再有"合并后的
+    //   访问使能"这个概念，读（perip_ren）和写（perip_wen）在 soc_bus 里分别处理。
+    //   上面那条 B8 不变量的精神不变：两侧读使能仍然取自 myCPU 的**顶层端口**。
 
     /* ---------------- 3) 同步 BRAM：IROM ----------------
      * IROM_BOOT=0：只读，程序在综合时由 $readmemh 固化（v11 行为，网表不变）；
@@ -229,7 +368,6 @@ module board_top #(
      * ★ 不变量：cpu_rst_eff 必须 = cpu_rst | boot_busy，且 boot_busy 在**所有**失败路径
      *   上都能回到 0（细节见 boot_loader.sv 头部的失败不变量）。
      * ------------------------------------------------------------------- */
-    logic cpu_rst_eff;
 
     /* 引导总线：★ v13 起提升到**模块作用域**声明 —— 因为 DRAM 的端口在引导期间
      * 也要被 loader 独占（原来只有 IROM 需要，声明在 generate 块里就够）。
@@ -240,7 +378,7 @@ module board_top #(
     logic [15:0] boot_words;
 
     generate
-        if (IROM_BOOT) begin : g_irom_boot
+        if (IROM_BOOT == 1) begin : g_irom_boot
             logic [ 7:0] boot_rx_data;
             logic        boot_rx_valid;
 
@@ -322,38 +460,6 @@ module board_top #(
                 .dbg_words (boot_words)
             );
 
-            assign cpu_rst_eff = cpu_rst | boot_busy;
-
-            // 可写版 IROM：mask=2'b11 表示整字写（loader 只发对齐的 32 位写）
-            // ★★ 不变量：这里的 reset **必须只接 cpu_rst，不能接 cpu_rst_eff**！
-            //   sync_mem 的写逻辑在 `if (reset) ... else begin ... if (wen) ...` 的
-            //   else 分支里 —— 复位期间写会被整段丢掉。而 cpu_rst_eff 在引导全程为 1
-            //   （= cpu_rst | boot_busy），接了它就会"校验和通过、但一个字都没写进去"，
-            //   表现为 CPU 起来后执行全 0 的 IROM（非法指令）。这个坑是仿真抓出来的。
-            //   引导期间 CPU 本来就被 cpu_rst_eff 按住，读口 ren 被 mux 成 0，
-            //   所以 IROM 不跟着复位是安全的。
-            sync_mem_dp #(
-                .WORDS     (IROM_WORDS),
-                .INIT_FILE (IROM_INIT)
-            ) irom_inst (
-                .clk     (sys_clk),
-                .reset   (cpu_rst),
-                // ---- 端口 A：取指（只读，引导期间 CPU 被按住 → ren=0）----
-                .a_addr  (irom_addr),
-                .a_ren   (boot_busy ? 1'b0 : irom_en),
-                .a_rdata (irom_data),
-                // ---- 端口 B：CPU 数据读/写（窗口 0x2_0000）/ 引导器写（'B' 帧）----
-                //   ★ 二者互斥：boot_busy=1 时 CPU 在复位，不可能来读/写。
-                //   ★ v16：CPU 的 store 也走这一路（写代码区），见上面 2a 段。
-                .b_addr  (boot_busy ? (boot_addr << 2) : perip_addr),
-                .b_ren   (boot_busy ? 1'b0 : (perip_en & irom_win_sel)),
-                .b_rdata (irom_d_rdata),
-                .b_wen   (boot_busy ? (boot_we & ~boot_mem_sel)
-                                    : (perip_wen & irom_win_sel)),
-                .b_wdata (boot_busy ? boot_wdata : perip_wdata),
-                .b_mask  (boot_busy ? 2'b11 : perip_mask)
-            );
-
             assign debug_boot_busy = boot_busy;
             assign debug_boot_ok   = boot_ok;
             assign debug_boot_err  = boot_err;
@@ -367,29 +473,10 @@ module board_top #(
                                    | ({22'b0, boot_rx_cnt} << 11);
             // 注：boot_words 目前不引出（避免多占 ILA probe）；需要时再加。
         end else begin : g_irom_rom
-            // v11 原样：只读、$readmemh 固化
-            sync_mem_dp #(
-                .WORDS     (IROM_WORDS),
-                .INIT_FILE (IROM_INIT)
-            ) irom_inst (
-                .clk     (sys_clk),
-                .reset   (cpu_rst),
-                .a_addr  (irom_addr),
-                .a_ren   (irom_en),
-                .a_rdata (irom_data),
-                // 无引导器时写口钉死；数据窗口照常可用（这就是"lw 能读 IROM"）
-                .b_addr  (perip_addr),
-                .b_ren   (perip_en & irom_win_sel),
-                .b_rdata (irom_d_rdata),
-                // ★ v16：这个分支（IROM_BOOT=0，纯 ROM 固化）也让窗口可写，好让
-                //   shell 的 load/run 在**仿真**里也能测（与 IROM_BOOT=1 行为一致）。
-                //   只有 CPU 能写到这里；没有引导器。
-                .b_wen   (perip_wen & irom_win_sel),
-                .b_wdata (perip_wdata),
-                .b_mask  (perip_mask)
-            );
-
-            assign cpu_rst_eff     = cpu_rst;
+            /* 无引导器分支（IROM_BOOT=0 纯 ROM 固化 / IROM_BOOT=2 AXI 主机装载）。
+             * ★ IROM 本体已经**提到 generate 外面**（见下面 3b 段），两支共用一份 ——
+             *   boot_busy 在这里被钉成 0，于是共享实例里所有 `boot_busy ? ... : ...`
+             *   的 mux 都被常量折叠成 CPU 侧，IROM_BOOT=0 的网表与 v18 逐位相同。 */
             assign debug_boot_busy = 1'b0;
             assign debug_boot_ok   = 1'b0;
             assign debug_boot_err  = 1'b0;
@@ -405,6 +492,44 @@ module board_top #(
             assign boot_words      = 16'd0;
         end
     endgenerate
+
+    /* ---------------- 3b) 同步 BRAM：IROM（两支共用，提到 generate 外） --------
+     * ★ 为什么要提出来：第 1 步新增了 IROM_BOOT=2（AXI 主机装载）这一支，如果照抄
+     *   一份 sync_mem_dp 就有三份拷贝、三个实例名，容易改漏。
+     *   IROM_BOOT=0/2 时 boot_busy 恒 0 ⇒ 下面每个 mux 都选 CPU 侧，
+     *   综合结果与 v18 的只读分支**逐位等价**（已用重建比特流核对 WNS/资源）。
+     *
+     * ★★ 不变量：这里的 reset **必须只接 cpu_rst，不能接 cpu_rst_eff**！
+     *   sync_mem 的写逻辑在 `if (reset) ... else begin ... if (wen) ...` 的 else 分支里
+     *   —— 复位期间写会被整段丢掉。而 cpu_rst_eff 在引导全程为 1
+     *   （= cpu_rst | boot_busy | ps_hold），接了它就会"校验和通过、但一个字都没写进去"，
+     *   表现为 CPU 起来后执行全 0 的 IROM（非法指令）。这个坑是仿真抓出来的。
+     *   引导/装载期间 CPU 本来就被按住，读口 ren 被 mux 成 0，所以 IROM 不跟复位是安全的。 */
+    sync_mem_dp #(
+        .WORDS     (IROM_WORDS),
+        .INIT_FILE (IROM_INIT)
+    ) irom_inst (
+        .clk     (sys_clk),
+        .reset   (cpu_rst),
+        // ---- 端口 A：取指（只读，引导/装载期间 CPU 被按住 → ren=0）----
+        .a_addr  (irom_addr),
+        .a_ren   (boot_busy ? 1'b0 : irom_en),
+        .a_rdata (irom_data),
+        // ---- 端口 B：CPU 数据读/写（窗口 0x2_0000）/ 引导器写（'B' 帧）----
+        //   ★ 二者互斥：boot_busy=1 时 CPU 在复位，不可能来读/写。
+        //   ★ v16：CPU 的 store 也走这一路（写代码区），见上面 2a 段。
+        .b_addr  (boot_busy ? (boot_addr << 2) : perip_addr),
+        .b_ren   (boot_busy ? 1'b0 : bus_re_code),
+        .b_rdata (irom_d_rdata),
+        .b_wen   (boot_busy ? (boot_we & ~boot_mem_sel) : bus_we_code),
+        .b_wdata (boot_busy ? boot_wdata : perip_wdata),
+        .b_mask  (boot_busy ? 2'b11 : perip_mask)
+    );
+
+    /* ---------------- 3c) 唯一的 cpu_rst_eff 定义点 ----------------
+     * 双核协同（第 1 步）：再加一个 ps_hold（AXI 主机的"等我把镜像灌完"）。
+     * AXIL_EN=0 时 ps_hold 被钉成 0 → 与 v18 等价的 cpu_rst | boot_busy。 */
+    assign cpu_rst_eff = cpu_rst | boot_busy | ps_hold;
 
     /* ---------------- 4) v12（B/C）MMIO：串口收发 + GPIO @ 0x1000_00xx -----
      * 为什么放在 0x1000_0000：DCache 的 UNCACHE_MASK 默认 0x0FFF_FFFF，地址 ≥ 0x1000_0000
@@ -433,13 +558,11 @@ module board_top #(
      *   就变成"谁先看到谁拿走"，引导期间 console FIFO 会吞掉镜像帧的字节（反之亦然）。
      *   两个接收器各自监听同一根线（~15 FF/个）比加仲裁便宜得多，也不会互相干扰。
      * ------------------------------------------------------------------- */
-    logic        mmio_sel;
-    logic [ 2:0] mmio_idx;
     logic        uart_busy;
-    logic [31:0] dram_rdata;
 
-    assign mmio_sel = (perip_addr[31:16] == 16'h1000) & (perip_addr[15] == 1'b0);
-    assign mmio_idx = perip_addr[4:2];
+    /* A1：`mmio_sel` / `mmio_idx` / `dram_rdata` 的声明与赋值都搬走了 ——
+     *   片选与寄存器号由 soc_bus 给（bus_hit_mmio / bus_mmio_idx），
+     *   dram_rdata 在 2a 段声明。这里只剩外设自己的状态。 */
 
     // 只对 TXDATA 的有效写产生 send 脉冲（顺带挡掉字节/半字写：UART 只认整字写，
     //   免得 sb 的低位数据落到别的字节通道上，行为取决于 mask 反而更难看）
@@ -450,7 +573,9 @@ module board_top #(
         .clk   (sys_clk),
         .rst   (cpu_rst),
         .data  (perip_wdata[7:0]),
-        .send  (perip_wen & mmio_sel & (mmio_idx == 3'd0)),
+        // ★ A1：send 用总线门过的写使能 we_mmio（已经保证命中 MMIO），
+        //   寄存器号用 soc_map 的宏，不再出现裸的 3'd0。
+        .send  (bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_TXDATA)),
         .tx    (uart_tx),
         .busy  (uart_busy)
     );
@@ -495,7 +620,7 @@ module board_top #(
      * ★ 旧语义（读即弹）在 v13.4 及以前有效；只有 sw/monitor.c 用过，已同步改。
      */
     logic rx_pop;
-    assign rx_pop = perip_wen & mmio_sel & (mmio_idx == 3'd6) & rx_avail;
+    assign rx_pop = bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_RXPOP) & rx_avail;
 
     always_ff @(posedge sys_clk) begin
         if (cpu_rst_eff) begin
@@ -526,7 +651,7 @@ module board_top #(
             //   "看起来正常、其实是后来那个字节"的错误序列，比丢字节更难查）
             if (con_rx_valid && (rx_cnt == 4'd8)) rx_ovf <= 1'b1;
             // RXSTAT 被读 → 清溢出位（读清语义，与常见 UART 一致）
-            if (perip_ren & mmio_sel & (mmio_idx == 3'd3)) rx_ovf <= 1'b0;
+            if (perip_ren & bus_hit_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_RXSTAT)) rx_ovf <= 1'b0;
         end
     end
 
@@ -534,28 +659,88 @@ module board_top #(
     logic [6:0] led_reg;
     always_ff @(posedge sys_clk) begin
         if (cpu_rst_eff)                                          led_reg <= 7'd0;
-        else if (perip_wen & mmio_sel & (mmio_idx == 3'd4))       led_reg <= perip_wdata[6:0];
+        else if (bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_LED)) led_reg <= perip_wdata[6:0];
     end
     assign led = led_reg;
+
+    /* ---- 双核协同（第 1/2/3 步）：CTL @ 0x1000_001C --------------------------
+     * 三个动作合成一个寄存器，因为 4 位索引下 0x1C 是最后一个空位（见 soc_map.sv）：
+     *   bit0 写 1 → dcache_inval 一拍脉冲（PS 改完 DRAM，CPU 读之前先清）
+     *   bit1 RW   → irq_ps 电平（CPU 敲 ARM）
+     *   bit2 写 1 → cpu_alive 置位（stub 报平安；PS 可用 CTRL.bit2 清）
+     * ★ 顺序敏感：dcache_inval 必须**先**于"读 PS 的数据"，中间不能有别的访存。
+     * ------------------------------------------------------------------------- */
+    always_ff @(posedge sys_clk) begin
+        if (cpu_rst_eff) begin
+            irq_ps_r   <= 1'b0;
+            cpu_alive_r <= 1'b0;
+        end else begin
+            if (bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_CTL)) begin
+                irq_ps_r <= perip_wdata[1];
+                if (perip_wdata[2]) cpu_alive_r <= 1'b1;
+            end
+            if (alive_clr)   cpu_alive_r <= 1'b0;
+            if (irq_ps_clr)  irq_ps_r    <= 1'b0;   // PS 收下中断后由它清（见 ps_ctrl）
+        end
+    end
+    assign irq_ps = irq_ps_r;
+
+    // 一拍脉冲：只在写 CTL 且 bit0=1 的那一拍有效
+    assign dcache_inval = bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_CTL)
+                        & perip_wdata[0];
 
     // 读：按寄存器号选，其余地址返回 DRAM
     // ★ 不变量：这个 mux 是**地址译码**，不是数据通路 —— 别把它塞进 DCache。
     // ★ RXDATA 的读值是"当前队头"，**不弹**；弹出由写 0x1000_0018 完成（v13.5）。
     // ★ v14：0x2_0000~0x2_FFFF 是 IROM 的数据窗口（第二读口），优先级在 MMIO 之后、
     //   DRAM 之前 —— 三者地址区间互不重叠，这里只是把三路拼起来。
+    /* ---------------- 4b) A2：PLIC-lite 接线（源信号到这里才齐） ---------------- */
+    assign plic_src[`SOC_IRQ_UART_RX]  = rx_avail;
+    assign plic_src[`SOC_IRQ_UART_OVF] = rx_ovf;
+    assign plic_src[`SOC_IRQ_TIMER]    = 1'b0;          // A3 接入 CLINT
+    assign plic_src[`SOC_IRQ_SW]       = irq_sw_pulse;
+    assign plic_src[7:5]               = 3'b000;
+    // 双核协同（第 3 步）：PS 经 AXI 控制寄存器 bit1 拉高的电平中断
+    assign plic_src[`SOC_IRQ_PS]       = ps_irq_to_cpu;
+
+    // 写 IRQ_PEND 的 1 表示"这个我处理完了"（claim 清位）；写 IRQ_SW 触发软件源
+    assign plic_clr     = {8{bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_IRQPEND)}} & perip_wdata[7:0];
+    assign irq_sw_pulse = bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_IRQSW);
+
+    plic_lite #(.NSRC(8)) plic_inst (
+        .clk      (sys_clk),
+        .reset    (cpu_rst),
+        .src      (plic_src),
+        .en_wdata (perip_wdata[7:0]),
+        .en_we    (bus_we_mmio & (bus_mmio_idx == `SOC_MMIO_IDX_IRQEN)),
+        .clr_we   (plic_clr),
+        .pending  (plic_pend),
+        .enabled  (plic_en),
+        .irq      (plic_irq),
+        .best_id  (plic_best)
+    );
+
+    /* ★ A1：这里**只剩外设自己的寄存器堆**。
+     *   原来"MMIO > 代码窗口 > DRAM"的三路优先级 mux 已经搬进 soc_bus ——
+     *   本模块不再需要知道代码窗口和 DRAM 的存在。 */
     always_comb begin
-        if (mmio_sel) begin
-            case (mmio_idx)
-                3'd1:    perip_rdata = {31'b0, uart_busy};
-                3'd2:    perip_rdata = {24'b0, rx_fifo[rx_rp]};
-                3'd3:    perip_rdata = {30'b0, rx_ovf, rx_avail};
-                default: perip_rdata = 32'b0;          // idx0(TXDATA)/idx4(LED) 读回 0
-            endcase
-        end else if (irom_win_sel) begin
-            perip_rdata = irom_d_rdata;                // IROM 第二读口（只读）
-        end else begin
-            perip_rdata = dram_rdata;
-        end
+        case (bus_mmio_idx)
+            `SOC_MMIO_IDX_TXSTAT: mmio_rdata = {31'b0, uart_busy};
+            `SOC_MMIO_IDX_RXDATA: mmio_rdata = {24'b0, rx_fifo[rx_rp]};
+            `SOC_MMIO_IDX_RXSTAT: mmio_rdata = {30'b0, rx_ovf, rx_avail};
+            // ---- A2：PLIC-lite ----
+            `SOC_MMIO_IDX_IRQPEND: mmio_rdata = {24'b0, plic_pend};
+            `SOC_MMIO_IDX_IRQEN:   mmio_rdata = {24'b0, plic_en};
+            `SOC_MMIO_IDX_IRQID:   mmio_rdata = {28'b0, plic_best};
+            // ---- A3：CLINT ----
+            `SOC_MMIO_IDX_MTIME:     mmio_rdata = clint_mtime;
+            `SOC_MMIO_IDX_MTIMEH:    mmio_rdata = 32'b0;
+            `SOC_MMIO_IDX_MTIMECMP:  mmio_rdata = clint_mtimecmp;
+            `SOC_MMIO_IDX_MTIMECMPH: mmio_rdata = 32'b0;
+            // ---- 双核协同：控制寄存器回读（bit1 = irq_ps 当前电平）----
+            `SOC_MMIO_IDX_CTL:       mmio_rdata = {30'b0, irq_ps_r, 1'b0};
+            default:              mmio_rdata = 32'b0;   // TXDATA/LED/BOOTREQ/RXPOP/IRQSW 读回 0
+        endcase
     end
 
     /* ---------------- 5) 同步 BRAM：DRAM（读写，按 mask 字节写） ----------------
@@ -565,25 +750,137 @@ module board_top #(
      *   所有 mux 都选 CPU 侧，网表与 v11/v12 完全等价。
      *   ★ 不变量：cpu_rst_eff = cpu_rst | boot_busy 保证"引导期间 CPU 不会来抢"，
      *     所以这里仍然不需要仲裁器。 */
-    sync_mem #(
-        .WORDS     (DRAM_WORDS),
-        .READ_ONLY (0),
-        .INIT_FILE ("")
-    ) dram_inst (
-        .clk   (sys_clk),
-        .reset (1'b0),
-        .addr  (boot_busy ? (boot_addr << 2) : perip_addr),
-        .ren   (boot_busy ? 1'b0 : perip_en),
-        .rdata (dram_rdata),
-        // ★ 不变量：MMIO 写必须挡住 DRAM 写（见上面第 4) 段的说明）
-        // ★ v13：引导写（boot_mem_sel=1 的 DRAM 帧）单独走这一路，与 MMIO 无关
-        // ★ v14：IROM 数据窗口（0x2_xxxx）也**只读** —— 写它既不改 IROM 也不改 DRAM，
-        //   静默丢弃。软件不该往代码区写；真要改镜像请走 boot_loader。
-        .wen   (boot_busy ? (boot_we & boot_mem_sel)
-                          : (perip_wen & ~mmio_sel & ~irom_win_sel)),
-        .wdata (boot_busy ? boot_wdata : perip_wdata),
-        .mask  (boot_busy ? 2'b11 : perip_mask)
-    );
+    /* ============ DRAM: single port (default) or shared with an AXI host (#6) ============
+     * Both forms present the CPU with the SAME timing contract (sync BRAM: ren cycle
+     * gives the address, rdata valid the next cycle; wen cycle writes per mask), so
+     * CPU behaviour does not change.
+     *
+     * AXIL_EN=1 uses board/dram_shared.sv: the CPU keeps its own read and write port;
+     * the AXI host *borrows* them in cycles where the CPU is idle (CPU always wins).
+     * A plain 32-bit array is used on purpose -- a true-dual-port byte-lane array is
+     * not inferable by Vivado (Synth 8-3391) and takes >400 s in xvlog. */
+    generate
+        if (AXIL_EN == 0) begin : g_dram_single
+            sync_mem #(
+                .WORDS     (DRAM_WORDS),
+                .READ_ONLY (0),
+                .INIT_FILE ("")
+            ) dram_inst (
+                .clk   (sys_clk),
+                .reset (1'b0),
+                .addr  (boot_busy ? (boot_addr << 2) : perip_addr),
+                .ren   (boot_busy ? 1'b0 : bus_re_dram),
+                .rdata (dram_rdata),
+                // ★ 不变量：MMIO 写必须挡住 DRAM 写（见上面第 4) 段的说明）
+                // ★ v13：引导写（boot_mem_sel=1 的 DRAM 帧）单独走这一路，与 MMIO 无关
+                // ★ v14：IROM 数据窗口（0x2_xxxx）也**只读** —— 写它既不改 IROM 也不改 DRAM，
+                //   静默丢弃。软件不该往代码区写；真要改镜像请走 boot_loader。
+                // ★ A1：`bus_we_dram` 已经在 soc_bus 里排除了 MMIO 与代码窗口，
+                //   所以这里**不再**重复写 `& ~mmio_sel & ~irom_win_sel` —— 一份判断只许有一处。
+                .wen   (boot_busy ? (boot_we & boot_mem_sel)
+                                  : bus_we_dram),
+                .wdata (boot_busy ? boot_wdata : perip_wdata),
+                .mask  (boot_busy ? 2'b11 : perip_mask)
+            );
+
+            assign s_axil_awready = 1'b0;
+            assign s_axil_wready  = 1'b0;
+            assign s_axil_bresp   = 2'b00;
+            assign s_axil_bvalid  = 1'b0;
+            assign s_axil_arready = 1'b0;
+            assign s_axil_rdata   = 32'h0;
+            assign s_axil_rresp   = 2'b00;
+            assign s_axil_rvalid  = 1'b0;
+
+            /* 双核协同的控制面在没有 AXI 主机时钉死 → 与 v18 逐位等价：
+             *   ps_hold      = 0 → cpu_rst_eff 回到 cpu_rst | boot_busy
+             *   ps_irq_to_cpu= 0 → PLIC 源 4 恒 0（行为同改造前）
+             *   alive_clr    = 0 → 没有主机来清"已到岗"标志 */
+            assign ps_hold      = 1'b0;
+            assign ps_irq_to_cpu = 1'b0;
+            assign alive_clr    = 1'b0;
+            assign irq_ps_clr   = 1'b0;
+        end else begin : g_dram_axil
+            logic [31:0] ax_addr, ax_wdata, ax_rdata;
+            logic        ax_req, ax_we, ax_gnt, ax_rvalid;
+            logic [ 3:0] ax_wstrb;
+
+            axil_slave u_axil (
+                .aclk          (axil_aclk),
+                .aresetn       (axil_aresetn),
+                .s_axil_awaddr (s_axil_awaddr), .s_axil_awprot (s_axil_awprot),
+                .s_axil_awvalid(s_axil_awvalid), .s_axil_awready(s_axil_awready),
+                .s_axil_wdata  (s_axil_wdata),  .s_axil_wstrb (s_axil_wstrb),
+                .s_axil_wvalid (s_axil_wvalid), .s_axil_wready (s_axil_wready),
+                .s_axil_bresp  (s_axil_bresp),  .s_axil_bvalid(s_axil_bvalid),
+                .s_axil_bready (s_axil_bready),
+                .s_axil_araddr (s_axil_araddr), .s_axil_arprot (s_axil_arprot),
+                .s_axil_arvalid(s_axil_arvalid), .s_axil_arready(s_axil_arready),
+                .s_axil_rdata  (s_axil_rdata),  .s_axil_rresp (s_axil_rresp),
+                .s_axil_rvalid (s_axil_rvalid), .s_axil_rready (s_axil_rready),
+                .m_addr (ax_addr), .m_req (ax_req), .m_we (ax_we),
+                .m_wdata (ax_wdata), .m_wstrb (ax_wstrb),
+                .m_gnt (ax_gnt), .m_rvalid (ax_rvalid), .m_rdata (ax_rdata)
+            );
+
+            /* ---- 双核协同：AXI 本地地址 0x2_0000 以上是**控制平面**，不是 DRAM。
+             *   BD 窗口 256 KB，DRAM 只占低 128 KB（0x0_0000..0x1_FFFF），
+             *   `addr[17]` 一位就能把"控制寄存器"和"DRAM"完全分开 —— 不动内存译码。
+             *   ★ 必须门掉通往 DRAM 的请求：否则 PS 写 0x2_0000 会顺带写 DRAM 第 0 个字
+             *     （addr[16:2]=0），把 shell 的 .rodata 开头改掉。 */
+            logic ax_is_ctrl, ax_gnt_dram, ax_gnt_ctrl;
+            logic ax_rv_dram, ax_rv_ctrl;
+            logic [31:0] ax_rd_dram, ax_rd_ctrl;
+
+            assign ax_is_ctrl = ax_addr[17];
+
+            ps_ctrl u_ps_ctrl (
+                .clk        (sys_clk),
+                .aresetn    (axil_aresetn),
+                .s_addr     (ax_addr),
+                .s_req      (ax_req),
+                .s_we       (ax_we),
+                .s_wdata    (ax_wdata),
+                .s_gnt      (ax_gnt_ctrl),
+                .s_rvalid   (ax_rv_ctrl),
+                .s_rdata    (ax_rd_ctrl),
+                .cpu_rst_eff(cpu_rst_eff),
+                .boot_busy  (boot_busy),
+                .plic_irq   (plic_irq),
+                .irq_ps     (irq_ps_r),
+                .cpu_alive  (cpu_alive_r),
+                .hold       (ps_hold),
+                .ps_irq     (ps_irq_to_cpu),
+                .alive_clr  (alive_clr),
+                .irq_ps_clr (irq_ps_clr)
+            );
+
+            dram_shared #(
+                .WORDS     (DRAM_WORDS),
+                .INIT_FILE ("")
+            ) dram_inst (
+                .clk   (sys_clk),
+                .reset (1'b0),
+                .cpu_addr  (boot_busy ? (boot_addr << 2) : perip_addr),
+                .cpu_ren   (boot_busy ? 1'b0 : bus_re_dram),
+                .cpu_rdata (dram_rdata),
+                .cpu_wen   (boot_busy ? (boot_we & boot_mem_sel) : bus_we_dram),
+                .cpu_wdata (boot_busy ? boot_wdata : perip_wdata),
+                .cpu_mask  (boot_busy ? 2'b11 : perip_mask),
+                .b_addr (ax_addr),
+                .b_req  (ax_req & ~ax_is_ctrl),   // ★ 控制窗口**不进** DRAM
+                .b_we   (ax_we),
+                .b_wdata (ax_wdata), .b_be (ax_wstrb),
+                .b_gnt (ax_gnt_dram), .b_rvalid (ax_rv_dram), .b_rdata (ax_rd_dram)
+            );
+
+            // 两条路的授权/响应互斥（由 ax_is_ctrl 选择），合成一路回桥
+            assign ax_gnt    = ax_is_ctrl ? ax_gnt_ctrl : ax_gnt_dram;
+            assign ax_rvalid = ax_is_ctrl ? ax_rv_ctrl  : ax_rv_dram;
+            assign ax_rdata  = ax_is_ctrl ? ax_rd_ctrl  : ax_rd_dram;
+        end
+    endgenerate
+
 
     /* ---------------- 6) 观测计数器引出 ---------------- */
     // v9 修复（B8）：四条计数器已经在 myCPU 的端口上接好了（见上面的例化），

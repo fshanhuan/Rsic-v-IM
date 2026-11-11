@@ -17,6 +17,24 @@ module myCPU (
     input cpu_clk,
     input cpu_rst,
 
+    // ①b A2：外部中断输入（PLIC-lite 的汇总 irq）→ CSR.mip.MEIP。
+    //   板级由 board/plic_lite.sv 驱动；不接（悬空 0）时行为与改造前完全一致。
+    input ext_irq,
+
+    // ①b2 双核协同（第 2 步）：D-cache 整表无效。
+    //   板级由 MMIO 0x1000_001C bit0 的一拍脉冲驱动；不接（TB 悬空）时为 x，
+    //   在 DCache 里 `if (inval)` 取 false —— 与"从不失效"等价，不影响老测试。
+    input dcache_inval,
+
+    // ①c A3：CLINT 的**总线侧**（board_top 把 MMIO 0x1000_0030 / 0x38 接到这里）。
+    //   计数器本体在核内的 clint 实例，所以 TB 不接这几根线也能正常跑：
+    //   mm_* 悬空 → 写使能为 x → Verilog 的 if(x) 取 false → 走"自增"分支。
+    input        mm_mtime_we,
+    input        mm_mtimecmp_we,
+    input [31:0] mm_wdata,
+    output [31:0] clint_mtime,
+    output [31:0] clint_mtimecmp,
+
     // ② 取指侧存储器接口（IROM）：ICache 用 addr/en 出去、data 回来；板级同步读，未命中靠 icache_hold 停拍重试。
     output [31:0] irom_addr,
     input  [31:0] irom_data,
@@ -87,6 +105,18 @@ module myCPU (
     (* mark_debug = "true", keep = "true" *) output  logic [31:0] debug_mcycle
 
 );
+
+  /* ★ P0-4（lint）：下面这几根线原来声明在自己的**使用点之后**，靠 Verilog 的隐式
+   *   网络规则"先隐式声明一根 1 bit 线、后面再真声明一次"。iverilog 容忍（所以一直
+   *   没暴露），xvlog 报 VRFC 10-2938。更要紧的是：隐式那根是 1 bit，而其中
+   *   dcache_m1_rdata / LSU_Rdata_m1 / MEM_m1_ok 是 32 bit/多 bit —— 一旦仿真器
+   *   认真按隐式网络处理，就是**截断**，而不是报错。统一提到模块体最前面。
+   *   （MEM_m1_ok / LSU_Rdata_m1 早在 421 行的前递里就被用了，所以不能只往上挪一点。） */
+  logic        lsu_req_seq;
+  logic        dcache_m1_hit;
+  logic [31:0] dcache_m1_rdata;
+  logic [31:0] LSU_Rdata_m1;
+  logic        MEM_m1_ok;
 
   // ===== 流水级内部连线：命名 <级名>_<信号>；IFU*（取指 → IDU）= 指令字 / PC / PC+4 / 有效位 =====
   logic [31:0] IFU_inst;
@@ -442,6 +472,28 @@ assign debug_mcycle = IDU_mcycle_dbg;
   logic LSU_valid_pipe;
   logic [31:0] LSU_forward_val_pipe;
 
+  // ==== A3：CLINT（mtime/mtimecmp 的唯一计数源）====
+  //   放在核内而不是板级，原因很实际：
+  //     · CSR 的 0x7C0/0x7C1 与总线 0x1000_0030/0x38 必须读写**同一份状态**，
+  //       隔着板级顶层会多出两跳端口和一处"谁先谁后"的歧义；
+  //     · 放在核内，所有既有 TB（只实例化 myCPU）不用改接线就能继续跑 ——
+  //       mm_* 悬空时写使能为 x，Verilog 的 if(x) 取 false，自动走"自增"分支。
+  logic        idu_mtime_we, idu_mtimecmp_we;
+  logic [31:0] idu_clint_wdata;
+
+  clint #(.DIV(`MTIME_DIV_DEFAULT)) clint_inst (
+      .clk             (cpu_clk),
+      .reset           (cpu_rst),
+      .csr_mtime_we    (idu_mtime_we),
+      .csr_mtimecmp_we (idu_mtimecmp_we),
+      .csr_wdata       (idu_clint_wdata),
+      .bus_mtime_we    (mm_mtime_we),
+      .bus_mtimecmp_we (mm_mtimecmp_we),
+      .bus_wdata       (mm_wdata),
+      .mtime           (clint_mtime),
+      .mtimecmp        (clint_mtimecmp)
+  );
+
   // ==== Control_inst0 —— 整机协同核心（控制面，不在流水线上）====
   //   决定 dnpc/dnpc_flag(flush)/EXU_inst_clear/IFU_stall，并给 IDU 选前递操作数（EXU/MEM/
   //   MEM_PIPE/MEM2/WB 五档）；输出都是**单拍命令**，不参与 valid/ready 对。
@@ -625,6 +677,12 @@ assign debug_mcycle = IDU_mcycle_dbg;
       .pred_target_in(IFU_pred_target),
       .pred_index_in (IFU_pred_index),
       .intr_take   (intr_take),
+      .ext_irq     (ext_irq),      // A2：PLIC-lite → CSR.mip.MEIP
+      .mtime_in     (clint_mtime),      // A3
+      .mtimecmp_in  (clint_mtimecmp),
+      .mtime_we_o   (idu_mtime_we),
+      .mtimecmp_we_o(idu_mtimecmp_we),
+      .clint_wdata_o(idu_clint_wdata),
       // ★ v13.2（P0）：只有"确实会提交"的那一拍，ecall/mret 才会改 CSR
       .sys_commit_ok(sys_commit_ok_ctrl),
       .intr_pending(IDU_intr_pending),
@@ -870,12 +928,8 @@ assign debug_mcycle = IDU_mcycle_dbg;
   //     同地址连写 4 拍）；反过来若用状态机串行化，则背靠背的两条 store 里第二条被
   //     静默丢弃（v10.1 修掉的真 bug）。两个方向都错，只能靠这个推进信号。
   logic lsu_adv;
-  logic lsu_req_seq;   // ★ v14（P4）：LSU 的请求身份证 → DCache
-  // ★ v15（load-use）：DCache 的 M1 命中探测口 ↔ LSU
-  logic        dcache_m1_hit;   // M1 地址命中（数据本拍可用）
-  logic [31:0] dcache_m1_rdata; // M1 地址的整字
-  logic [31:0] LSU_Rdata_m1;    // 按 M1 的 funct3/偏移选道后的值
-  logic        MEM_m1_ok;       // 本拍 MEM 级 load 数据可用（供前递 + 免停）
+  // ★ P0-4：lsu_req_seq / dcache_m1_* / LSU_Rdata_m1 / MEM_m1_ok 的声明已提到模块体
+  //   最前面（前递逻辑里更早就用到它们，留在这里会被隐式声明成 1 bit）。
   assign lsu_adv = WBU_ready & ~dcache_hold & ~EXU_mdu_busy;
   DCache DCache_inst (
       .clk       (cpu_clk),
@@ -887,6 +941,9 @@ assign debug_mcycle = IDU_mcycle_dbg;
       .cpu_mask  (lsu_bus_mask),
       .cpu_adv   (lsu_adv),
       .req_seq   (lsu_req_seq),
+      // ★ 双核协同（第 2 步）：整表无效，由 board_top 的 MMIO 0x1000_001C bit0 驱动
+      //   （PS 改完共享 DRAM 之后，CPU 读之前必须先清，否则读到旧行）。
+      .inval     (dcache_inval),
       .m1_addr   (LSU_Ex_result),
       .m1_en     (LSU_mem_ren),
       .m1_hit    (dcache_m1_hit),

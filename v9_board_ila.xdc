@@ -26,8 +26,10 @@
 
 # ---- 主时钟：板上真实输入是 100MHz，必须按 10ns 约束 ------------------------
 # CPU 实际跑的 50MHz **不要**手写 create_clock —— 它由 board_top_ila 里的
-# MMCM（100MHz × 10 / 20）派生，Vivado 会自动生成派生时钟约束，
-# 报告里能看到 sys_clk_50m（周期 20ns）。
+# MMCM（100MHz × 10 / 20）派生，Vivado 会自动生成派生时钟约束。
+# ★ 实测（v11）：自动派生时钟在报告里的名字是 **clk_sys_unbuf**（周期 20ns），
+#   不是本注释原来写的 sys_clk_50m —— 名字取自驱动它的那条网。引用它时以报告为准
+#   （见 project_src/timing_post_route.default.rpt 的 Clock Summary）。
 create_clock -period 10.000 -name sys_clk [get_ports sys_clk]
 
 # ---- 复位（按键，低有效） --------------------------------------------------
@@ -44,8 +46,61 @@ set_false_path -from [get_ports btn_rst_n]
 #   屏蔽它是**语义正确**的（异步置位、同步释放），不是为了让时序好看。
 set_false_path -from [get_cells -hier -filter {NAME =~ *reset_sync_inst/sync_ff2_reg*}]
 
+# ---- 心跳输出：不做时序分析（v11 新增） ------------------------------------
+# debug_dead 是**唯一**引到引脚上的输出（LED0，V4），它只是"调试量的或"，没人看它的时序。
+# 原来漏了这条 → 时序报告里有 `6. checking no_output_delay (1)`。
+# ★ 顺手记一笔（别再照抄 noila 的约束）：syn/v9.xdc 里有 9 条
+#   `set_false_path -to [get_ports debug_wb_* / debug_*_cnt]`，但**本 ILA 顶层没有那些端口** ——
+#   board_top_gui 只有 sys_clk / btn_rst_n / debug_dead 三个端口，
+#   debug_wb_*、各计数器、mcause/mepc/mtval 全是**内部网**（负载是 ILA 的 probe）。
+#   照抄那 9 条只会得到一堆 "no objects matched" 告警。
+# 同理 `5. checking no_input_delay (1)` 指的是 btn_rst_n —— 它已由上面两条 false_path
+#   按"异步输入"处理，这个提示是预期的，不需要再补 input_delay。
+set_false_path -to [get_ports debug_dead]
+
 # ---- 时钟不确定性与抖动 ----------------------------------------------------
-set_clock_uncertainty 0.100 [get_clocks sys_clk]
+# v11（A）：CPU 实际跑的是 MMCM 派生的 50MHz（报告里叫 clk_sys_unbuf）。原来只给**输入**
+#   时钟 sys_clk 加了 0.100ns，等于 **CPU 域完全没有用户保护带**，余量只剩 Vivado 自动
+#   推导的 MMCM 抖动模型。
+#   实测后果：post-route 的最差 hold 路径就落在 clk_sys_unbuf 域里，只剩 **0.020ns** ——
+#     源 LSU_Inst0/rs2_value_reg_pipe_reg[11] （SLICE_X82Y47）
+#     目的 DCache_inst/store2_wdata_reg[11]      （SLICE_X82Y50）
+#     同一条时钟网（同一 BUFG，fo=23279）、**0 逻辑级**、数据路径 0.342ns、
+#     时钟 skew +0.263ns 还是**帮忙**方向、CPPR 0.280ns 已生效。
+#   20ps @ 50MHz = 周期的 0.1%，工程上应读作"擦线通过"而不是"有余量"。
+#   setup 目前有 2.027ns 余量，所以给 hold 补保护带是**免费**的（代价只是短路径多绕一点线）。
+#
+# ★★ 教训（v11 第一次上板就踩了，别再犯）：**XDC 不是通用 Tcl 脚本**。
+#   第一版这里写的是 set/get_clocks -include_generated_clocks + `foreach` + `puts`，
+#   想让"父时钟派生出来的所有时钟"都吃到约束。结果综合日志直接报：
+#     CRITICAL WARNING: [Designutils 20-1307] Command 'foreach' is not supported  [:80]
+#     CRITICAL WARNING: [Designutils 20-1307] Command 'foreach' is not supported  [:87]
+#     CRITICAL WARNING: [Designutils 20-1307] Command 'puts'    is not supported  [:90]
+#   后果是双重的，而且都很隐蔽：
+#     1) 循环体**整段被跳过** ⇒ clk_sys_unbuf 的 hold 约束根本没加上，WHS 还是 0.020
+#        （= 以为加了、其实没加，这正是最坏的情况）；
+#     2) 触发 INFO: [runtcl-6] "Synthesis results are not added to the cache due to
+#        CRITICAL_WARNING" —— 综合结果不进缓存。
+#   XDC 只支持一个**受限命令子集**：约束命令 + set/get_* / list / expr 等，
+#   **不支持** foreach / while / if / proc / puts / source / exec / lappend。
+#   （离线检查工具 _diag/chk_xdc.py 当时只验了"Tcl 语法能过"，而语法正确 ≠ XDC 合法。）
+#
+# ★ 现在的写法：一条 get_clocks 取"父时钟 + 它派生出的全部时钟"，再显式补上
+#   clk_sys_unbuf 这个名字，全程零控制流。
+#   - -include_generated_clocks 保证**将来**改 MMCM 分频/改名也不会漏（派生时钟名字会自动变）；
+#   - 显式写 clk_sys_unbuf 是防止"-include_generated_clocks 在综合阶段还没派生"这种极端情况；
+#   - 两个 pattern 一起给，命中集**一定至少含 sys_clk**，永远不会产生"空对象列表"
+#     （空列表在 Vivado 里很可能直接 ERROR 让综合失败，那是比失效更糟的结果）；
+#   - 某个名字此刻还不存在时只会被静默跳过（-quiet），不会中断流程。
+#   - 生效与否**用时序报告的数字验证**，不靠日志打印：
+#     跑完看 clk_sys_unbuf 的 WHS，从 0.020 抬到 ~0.20 才算真的生效。
+#   时钟名以 project_src/timing_post_route.default.rpt 的 Clock Summary 为准：
+#     sys_clk {0.000 5.000} 10ns 100MHz
+#       clk_sys_unbuf {0.000 10.000} 20ns 50MHz   <-- CPU 逻辑全在这条上
+#       clkfb        {0.000 5.000} 10ns 100MHz    <-- MMCM 反馈，无用户路径，不用管
+set ila_unc_clks [get_clocks -quiet -include_generated_clocks {sys_clk clk_sys_unbuf}]
+set_clock_uncertainty -setup 0.100 $ila_unc_clks
+set_clock_uncertainty -hold  0.200 $ila_unc_clks
 
 # =============================================================================
 # 引脚约束：2 个输入 + 1 个状态输出

@@ -31,6 +31,16 @@ module CSR #(
     input  logic        ecall_flag,
     input  logic        mret_flag,
     input  logic        intr_take,   // Control 判定“本拍接收中断”
+    // ★ A2：外部中断输入（PLIC-lite 汇总后的 irq）→ mip.MEIP。
+    //   改造前这里是 `assign meip = 1'b0;`（全核只有 mtime 一个源，外设全靠轮询）。
+    input  logic        ext_irq,
+
+    /* ---- A3：CLINT 归一。计数器本体在 rtl/clint.sv，CSR 只做门面 ---- */
+    input  logic [31:0] mtime_in,
+    input  logic [31:0] mtimecmp_in,
+    output logic        mtime_we_o,
+    output logic        mtimecmp_we_o,
+    output logic [31:0] clint_wdata_o,
 
     // ---- v9 新增（C4）：统一异常通道 ----
     // ★ 不变量（v10 修正）：这里**只有 trap_take 一根确认线**。原来还有一根
@@ -104,42 +114,17 @@ module CSR #(
     //     （board_top_ila 的 MMCM 分频），所以 mtime 的真实速率是 **500kHz / 2µs 每 tick**。
     //     也正因为它是墙钟而不是拍数，v12（B）才补了 mcycle/minstret —— 要量拍数只能靠它们。
     //   细节：syn/修复史_全量.md §CSR-1
-    logic [31:0] mtime_reg;
-    logic [31:0] mtime_divcnt;
-    logic        mtime_tick;
-    always_comb begin
-        if (`MTIME_DIV_DEFAULT <= 1) mtime_tick = 1'b1;
-        else                         mtime_tick = (mtime_divcnt >= (`MTIME_DIV_DEFAULT - 1));
-    end
-
-    always_ff @(posedge clock) begin
-        if (reset) begin
-            mtime_divcnt <= 32'b0;
-            mtime_reg    <= 32'b0;
-        end else if (csr_wen[`CSRW_MTIME]) begin
-            // ★ v10.3：软件写优先于自增，且顺带把分频计数器清零（下一 tick 从整分频开始算，
-            //   否则刚写完 0 又立刻 +1，读回来比写入值大 1，软件没法用它做精确基准）。
-            //   原来这里没有写分支，`csrw mtime, x1` 被静默丢弃 —— 而 0x7C0 在规范里属于
-            //   "Custom read/write"，不写就是假实现。
-            mtime_divcnt <= 32'b0;
-            mtime_reg    <= csrd;
-        end else if (mtime_tick) begin
-            mtime_divcnt <= 32'b0;
-            mtime_reg    <= mtime_reg + 32'd1;
-        end else begin
-            mtime_divcnt <= mtime_divcnt + 32'd1;
-        end
-    end
-
-    logic [31:0] mtimecmp_reg;
-    always_ff @(posedge clock) begin
-        // mtimecmp 复位成全 1：上电后 mtime 追不上它，不会立刻冒出 MTIP 中断
-        if (reset)                              mtimecmp_reg <= 32'hFFFF_FFFF;
-        else if (csr_wen[`CSRW_MTIMECMP])        mtimecmp_reg <= csrd;
-    end
-
-    assign mtime_out    = mtime_reg;
-    assign mtimecmp_out = mtimecmp_reg;
+    /* A3：计数器搬进 rtl/clint.sv（唯一计数源）。这里只做三件事：
+     *   ① 读：把 CLINT 当前值转发出去（CSR 0x7C0/0x7C1 变成门面）；
+     *   ② 写：把 csrw 变成一根 we 脉冲送给 CLINT；
+     *   ③ mtip 比较（见下面 mip 一节）。
+     * 原来的 mtime_reg / mtime_divcnt / mtimecmp_reg 全部删除 —— 保留两套计数器
+     * 会因为复位相位与写入时刻不同而漂移，软件混用两条路径时时间对不上。 */
+    assign mtime_out     = mtime_in;
+    assign mtimecmp_out  = mtimecmp_in;
+    assign mtime_we_o    = csr_wen[`CSRW_MTIME];
+    assign mtimecmp_we_o = csr_wen[`CSRW_MTIMECMP];
+    assign clint_wdata_o = csrd;
 
     /* --------------------------- v12（B）Zicntr -------------------------- */
     // 标准计数器对（Zicntr，原 Base counters）：mcycle = 时钟拍数，minstret = 退休指令数。
@@ -187,8 +172,8 @@ module CSR #(
     logic [31:0] mip_sw_reg;              // 软件可写部分（MSIP）
     logic        mtip;                    // 定时器中断挂起（硬件）
     logic        meip;
-    assign mtip = (mtime_reg >= mtimecmp_reg);  // 无符号比较：mtime 追平即挂起
-    assign meip = 1'b0;                   // 预留外部中断输入
+    assign mtip = (mtime_in >= mtimecmp_in); // 无符号比较：mtime 追平即挂起（A3：值来自 CLINT）
+    assign meip = ext_irq;                // A2：由 PLIC-lite 驱动（原为恒 0）
 
     always_ff @(posedge clock) begin
         if (reset)                        mip_sw_reg <= 32'b0;
@@ -209,6 +194,12 @@ module CSR #(
     logic [31:0] mstatus_reg;
     logic [31:0] mstatus_nxt;
     logic        mstatus_wen;
+    /* ★ P0-4（lint 抓出来的真问题）：trap_commit_eff 以前在**使用之后**才声明
+     *   （旧代码 assign mstatus_wen 在前、logic trap_commit_eff 在后）。Verilog-2001
+     *   的隐式网络规则会让前面那次使用先造出一根 1 bit 隐式线，后面再声明一次同名
+     *   变量 —— iverilog 不报错（所以一直没暴露），xvlog 直接 VRFC 10-3380 报错。
+     *   声明提前，语义不变（本来就是 1 bit），但从此 lint 是干净的。 */
+    logic        trap_commit_eff;
     // ★ 不变量：mstatus_wen 必须含 trap_take —— 同步异常（非法指令/非对齐访存）与
     //   中断/ecall/mret **一样**要改 mstatus（MPIE<=MIE、MIE<=0）。原来只有
     //   intr_take|ecall_flag|mret_flag，同步异常不关中断，语义是错的。§CSR-2
@@ -239,7 +230,6 @@ module CSR #(
         else if (trap_commit)        trap_blank <= 4'd8;
         else if (trap_blank != 4'd0) trap_blank <= trap_blank - 4'd1;
     end
-    logic trap_commit_eff;
     assign trap_commit_eff = trap_commit & (trap_blank == 4'd0);
 
     /* ★★ v13 修复（真实功能缺陷，v12 及以前一直存在）：

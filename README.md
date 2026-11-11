@@ -2,35 +2,29 @@
 
 > **工具链：Vivado 2025.2 / 目标板：依元素 EES-331 / 器件：`xc7z020clg484-1`**
 >
-> 本仓库 = 完整工程（v9 起，当前 **v17**）。**核心 RTL 只有一份，在 `rtl/`**；
+> 本仓库 = 完整工程（当前 **v17**）。**核心 RTL 只有一份，在 `rtl/`**；
 > 板级件在 `board/`、流水乘除的编译版是 `rtl/MDU_pipelined.sv`；
 > Vivado 综合的和 `sim/run_iverilog.bat` 跑的是**同一份文件**，不会出现副本不同步。
 >
-> 2026-10 起，**本目录本身就是仓库根目录**。此前它只是 `E:\share doc\v9`
-> 的工作副本，每次构建前会从"仓库正本"覆盖 RTL —— 那套两棵树同步机制已经退休，
-> 详见 §4.1 末尾。
+> 2026-10 起，**本目录本身就是仓库根目录**，不再从外部目录覆盖 RTL。
 
 ---
 
 ## 0. v17 现状（2026-10-20）
 
-> ⚠️ **本文正文（§1 起）写于 v9**：讲的是「上板 + ILA 抓波形」那套流程，**流程仍然适用**。
-> 但从 v9 到 v17 核本身改动很多（引导器、UART、shell、Cache 与分支预测改版），
-> **所有性能/资源数字以本节为准，不要引用 §1 表格里 v9 的 WNS 与 LUT。**
+| 指标 | **v17（当前 `rtl/`）** |
+| --- | --- |
+| 时钟 | 50 MHz；WNS **+0.048 ns** / WHS +0.015 ns（⚠ 余量已贴线） |
+| LUT / FF | **36 150（67.9%）/ 34 058（32.0%）** |
+| Block RAM | **66.5 tile**（IROM 64 KB + DRAM 128 KB） |
+| CoreMark 1.0 | **128.82 iter/s = 2.576 CoreMark/MHz**（1400 次迭代，10.868 s，CRC 官方值） |
+| 取指 | 直连 IROM 同步读；数据窗口 `0x0002_0000..0x0002_FFFF`（可读可写） |
+| 分支预测 | **BTB/PHT 256 + GHR 8 + RAS 8** |
+| 数据缓存 | **256 行**，并加了 M1 探测读口（load-use 由 2 拍降到 1 拍） |
+| 外设 | UART 115200 收发 + 8 深 RX FIFO + LED×7 + 500 kHz `mtime` |
+| 软件 | **C 工具链**（rv32 gcc 13.2）+ CoreMark + FreeRTOS 移植 + 16 命令 shell |
 
-| 指标 | v9（正文，小配置） | **v17（当前 `rtl/`）** |
-| --- | --- | --- |
-| 时钟 | 50 MHz | 50 MHz；WNS **+0.048 ns** / WHS +0.015 ns（⚠ 余量已贴线） |
-| LUT / FF | 13 012 / 14 776 | **36 150（67.9%）/ 34 058（32.0%）** |
-| Block RAM | 38.5 tile | **66.5 tile**（IROM 64 KB + DRAM 128 KB） |
-| CoreMark 1.0 | 未测 | **128.82 iter/s = 2.576 CoreMark/MHz**（1400 次迭代，10.868 s，CRC 官方值） |
-| 取指 | I-Cache 64 行 | 直连 IROM 同步读；新增数据窗口 `0x0002_0000..0x0002_FFFF`（可读可写） |
-| 分支预测 | BTB/PHT 64 + GHR 6 | **BTB/PHT 256 + GHR 8 + RAS 8** |
-| 数据缓存 | 64 行 | **256 行**，并加了 M1 探测读口（load-use 由 2 拍降到 1 拍） |
-| 外设 | 无 | UART 115200 收发 + 8 深 RX FIFO + LED×7 + 500 kHz `mtime` |
-| 软件 | 手写 hex 程序 | **C 工具链**（rv32 gcc 13.2）+ CoreMark + FreeRTOS 移植 + 16 命令 shell |
-
-### 0.1 相对 v9 的能力增量
+### 0.1 能力清单
 
 - **串口引导**：上电由 `board/boot_loader.sv` 从 UART 收镜像写入 IROM，校验通过后释放 CPU；
   运行期用 shell 的 `b` 命令可重回引导器，不必按键复位。
@@ -61,25 +55,6 @@ bash sw/run_dptest.sh
 > ⚠️ `_diag/`（一键验收脚本：`regress.ps1` 38 项回归、`board_smoke.ps1` 6 项上板自检、
 > `load_app.ps1` 加载执行）按本仓库既有约定**不入库**；等价的手工命令见
 > `docs/开发记录.md` §7「一键验收」。
-
-**v9 阶段状态（历史，仅作对照；当前状态见 §0）**
-
-| 指标 | 实测值（**v9 B9 重建后**） |
-| --- | --- |
-| CPU 时钟 | **50MHz**（板载 100MHz 经 MMCM 分频） |
-| WNS / WHS | **+4.890 ns / +0.021 ns**，建立时间失败端点 **0**（`All user specified timing constraints are met.`） |
-| Fmax | **≈ 63 MHz** 以上（50MHz 余量约 26%，B9 后 WNS 从 4.162 升到 4.890） |
-| DRC（后布线） | **0 Error、0 Critical Warning** |
-| 资源 | LUT 13012 (24.5%)、FF 14776 (13.9%)、Block RAM Tile 38.5 (27.5%)、DSP48E1 12、**Bonded IOB 3**、BUFGCTRL 2 |
-| 调试手段 | 片内 **ILA**（`ila` IP 6.2，**16 探针**、深度 2048），顶层只 3 个引脚 |
-| iverilog 回归 | 7 程序全过（`prog` 36/36）+ `tb_dcache_unit` PASS |
-| 板上结论 | 程序逐拍执行**完全正确**（`mul`=35、存/取往返=12、`beq` 不跳、`jal` 跳过 `0x2C`）；`ecall` 重定向**已修并在板上确认**：PC 每 ~43 拍绕回 `mtvec`，`mepc` 恒 `0x34`，`icache_miss_cnt` 冻结在 15 |
-
-> ★ **v9 B9（2026-10-15）**：上板 ILA 抓到 `ecall` 之后 PC 从不回到 `mtvec(=0)`，
-> 而是一路顺序爬行、每绕 IROM 一圈又执行一次 `ecall`（`mepc` 每次 `+0x4000`）。
-> 根因是 `rtl/IFU.sv` 用 `dnpc_flag & ready` 门控真实重定向，而 `ecall`/`mret`/`fence.i`
-> 的 `dnpc_flag` **只有一拍宽**，撞上 `ready=0` 就**永久丢失**。已改成 `else if (dnpc_flag)`。
-> 完整定位过程（含逐拍证据、仿真复现、新增回归断言）：[`docs/vivado/ecall重定向故障_根因与修复.md`](docs/vivado/ecall重定向故障_根因与修复.md)。
 
 ---
 
@@ -325,7 +300,6 @@ iverilog **7/7 回归全过**；编译诊断（`sorry`/`error` 计数）改动�
 > **时序对照**：改动前 `WNS = 4.890 ns` → 之后 `WNS = 3.445 ns`（**−1.445 ns**）。
 > 这是 H1 把 `up_stall` 引入"接收"组合路径的预期代价，但仍**远大于 0**
 > （50 MHz 周期 20 ns，留给布局布线的余量充足）。`WHS` 基本不变（0.021 → 0.032 ns）。
-> 之后 v9 B9 的 `IFU` 修复又把 WNS 拉回 **+4.890 ns**（见开头指标表）。
 
 **对已上板硬件的影响**：H1/H2 都改了 RTL，**必须重新综合烧板**。
 其中 H2 对板级**无功能影响** —— `board/sync_mem.sv` 的读口是 `if (ren) rdata <= mem_ram[word_addr];`，

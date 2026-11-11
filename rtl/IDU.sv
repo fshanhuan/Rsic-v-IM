@@ -112,6 +112,16 @@ module IDU(
     input         retire,
     output [31:0] mcycle_dbg,
 
+    // ---- A2：外部中断（PLIC-lite 汇总）→ 透传给 Reg_Stack 里的 CSR ----
+    input         ext_irq,
+
+    // ---- A3：CLINT（mtime/mtimecmp 计数器在 myCPU 里的 clint 实例）----
+    input  [31:0] mtime_in,
+    input  [31:0] mtimecmp_in,
+    output        mtime_we_o,
+    output        mtimecmp_we_o,
+    output [31:0] clint_wdata_o,
+
     // ---- v10.2 新增：CSR 读口的 RAW 前递 --------------------------------
     //   csr_sel：本拍要读的 CSR 的独热码（位映射同 csr_wen，只含 bit0..bit7）
     //   csr_rd_fwd_en/value：Control 从 4 深影子链 + EX 级里挑出的**最新一次在途写**的值。
@@ -695,6 +705,12 @@ Reg_Stack Reg_Stack_inst0(
     .ecall_flag (ecall_flag & sys_commit_ok),
     .mret_flag (mret_flag & sys_commit_ok),
     .intr_take (intr_take),
+    .ext_irq   (ext_irq),      // ★ A2：PLIC-lite → CSR.mip.MEIP
+    .mtime_in     (mtime_in),  // ★ A3
+    .mtimecmp_in  (mtimecmp_in),
+    .mtime_we_o   (mtime_we_o),
+    .mtimecmp_we_o(mtimecmp_we_o),
+    .clint_wdata_o(clint_wdata_o),
 
     .rs1 (rs1),
     .rs2 (rs2),
