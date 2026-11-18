@@ -206,15 +206,38 @@ module DCache #(
     // ★ v13：和回填一样，读返回也必须"确实是发给当前地址的那次读"。
     //   只比 index/tag 还不够 —— 实测（[MBAD] c=4564 addr=000103c8 got=00010530）
     //   出现过"读返回被张冠李戴给另一个地址"的情况，data 是别人的。
+    //
+    /* ★★ 2026-11-17（记录仪项目）：不可缓存那一项还要再加 `cpu_addr == rd_addr_r`。
+     * -------------------------------------------------------------------------
+     * 实测症状（sim/tb_recorder.sv 逐拍）：软件连续读**两个不同**的 MMIO 寄存器时，
+     * 第二个读到的是**第一个**的值。记录仪里就是 `lw 0x94`（ADC FIFO 占用数=1024）
+     * 读回 0x84（显示 bank）的 0/1 → 每列取 0 个样本 → 一帧一个样本都不弹。
+     *
+     * 机理：`cpu_addr_r`/`req_same`/`rd_addr_r` 描述的是**上一笔**（已寄存的）请求。
+     * 当 LSU 已经给出**下一笔**地址（cpu_addr 已变，cpu_addr_r 还是旧的）时，
+     * 这一项仍然成立 —— 于是"上一笔的返回"被当成"当前这笔也好了"，hold 被提前撤掉，
+     * LSU 就把当时总线上的残留值锁进 rdata_reg2（实测锁到 0）。
+     * 逐拍证据：请求 0x94 的那一拍 hold=0，而 LSU 的 rdata_reg2 里恰好是上一笔 0x84 的 0/1。
+     *
+     * 修法：只有"当前地址 == 那次读的地址"才算这笔的返回。
+     *   安全性：粘滞等待期间 LSU 被 hold 冻住、cpu_addr 不动，所以 cpu_addr 必然等于
+     *   rd_addr_r —— 不会出现注释里担心的"重发被禁 → 永远等不到响应"的自锁。
+     */
     assign resp_for_now = (mem_data_vld & (cpu_index_r == index) & (cpu_tag_r == tag_in)
                            & (rd_addr_r == cpu_addr_r))
-                        | (uncacheable & unc_busy & req_same & (rd_addr_r == cpu_addr_r));
+                        | (uncacheable & unc_busy & req_same & (rd_addr_r == cpu_addr_r)
+                           & (cpu_addr == rd_addr_r));
 
     // 本拍请求是否命中（供 cpu_rdata 与计数器使用）
     assign hit  = hit_now;
     assign miss = resp_for_now & ~hit_now;
 
-    // 命中取缓存行（当前地址的 index）；未命中直接给 DRAM 回来的原始整字
+    // 命中取缓存行（当前地址的 index）；未命中直接给总线回来的原始整字
+    // ★ 2026-11-17（记录仪项目）记一笔：这里**必须**保持"读数据比地址晚一拍"这一条
+    //   不变量。MMIO 原来在 soc_bus 里是组合 mux（当拍就有效），比 DRAM/IROM 早一拍，
+    //   于是"连续读不同 MMIO 寄存器"会读到上一条地址的数据（实测：读 0x94 的 FIFO
+    //   占用数得到 0x84 的 bank 值）。修法在 board_top（给 mmio_rdata 补一级寄存器），
+    //   不在这里改 —— 这样 DCache 与 v18 逐位相同。
     assign cpu_rdata = hit_now ? data[index] : mem_rdata;
 
     // hold 口径（见上面的契约）：请求存在、且本拍 cpu_rdata 不是这条 load 的数据（既没命中、也不是它的

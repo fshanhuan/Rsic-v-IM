@@ -1,4 +1,6 @@
 # DCache 接口详解（25 个端口）
+> **状态**：基础文档（2026-10-22）｜仍有效：`rtl/DCache.sv` 25 个端口
+
 
 > 对象：`rtl/DCache.sv`（实例 `DCache_inst`）。行号以 v17 工作区为准。
 > 存储组织：256 行 × 1 字 = 1 KB，直接映射；`INDEX_BITS=8`、`TAG_BITS=22`

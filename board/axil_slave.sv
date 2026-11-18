@@ -26,7 +26,16 @@
  *     m_req 保持到 m_gnt；被授权后：写下一拍 bvalid，读下一拍 m_rvalid 后 rvalid。
  *   这样桥能接"当拍就收"的 BRAM，也能接带借用仲裁的 board/dram_shared.sv。
  * ============================================================================= */
-module axil_slave (
+module axil_slave #(
+    /* ★ 2026-11-18 上板教训（S5 必须的保险）：
+     *   Zynq 的 PS 侧 M_AXI_GP0 如果发起一笔事务而**从端永远不授权**，PS 的中央互连会被
+     *   这笔挂起的事务锁死 —— 连 JTAG 都 halt 不进 A9（实测 "Cannot halt processor core, timeout"），
+     *   只能断电重上电。所以这里给"等授权/等返回"加了硬超时：超时就回 SLVERR 并放行，
+     *   宁可在软件侧看到一个错误，也不能把主机的总线挂死。
+     *   本模块只在 AXIL_EN=1 的 PS 工程里生效；记录仪产品位流 AXIL_EN=0，端口全钉死，
+     *   所以这条改动对已验证的记录仪位流**没有影响**。 */
+    parameter int GNT_TMO = 64
+) (
     // ---------------- AXI4-Lite 从口 ----------------
     input  logic        aclk,
     input  logic        aresetn,
@@ -84,6 +93,11 @@ module axil_slave (
     logic [31:0] araddr_r;
     logic [31:0] rdata_r;
 
+    // 响应码：正常 OKAY，授权/返回超时 SLVERR
+    logic [1:0]  bresp_r, rresp_r;
+    // 等授权/等返回的计时（防止把主机总线挂死）
+    logic [15:0] tmo_cnt;
+
     // ---------------- 通道握手 ----------------
     assign s_axil_awready = (st == S_IDLE) && !aw_got;
     assign s_axil_wready  = (st == S_IDLE) && !w_got;
@@ -92,8 +106,8 @@ module axil_slave (
 
     assign s_axil_bvalid  = (st == S_WB);
     assign s_axil_rvalid  = (st == S_RB);
-    assign s_axil_bresp   = 2'b00;             // OKAY
-    assign s_axil_rresp   = 2'b00;
+    assign s_axil_bresp   = bresp_r;           // OKAY / SLVERR(超时)
+    assign s_axil_rresp   = rresp_r;
     assign s_axil_rdata   = rdata_r;
 
     assign m_addr  = (st == S_WRQ) ? awaddr_r : araddr_r;
@@ -112,6 +126,9 @@ module axil_slave (
             wstrb_q  <= 4'h0;
             araddr_r <= 32'h0;
             rdata_r  <= 32'h0;
+            bresp_r  <= 2'b00;
+            rresp_r  <= 2'b00;
+            tmo_cnt  <= 16'd0;
         end else begin
             // ---- 两个写通道各自握手（可以相隔很多拍）----
             if (s_axil_awvalid && s_axil_awready) begin
@@ -126,10 +143,14 @@ module axil_slave (
 
             case (st)
                 S_IDLE: begin
+                    tmo_cnt <= 16'd0;
                     if (s_axil_arvalid && s_axil_arready) begin
                         araddr_r <= s_axil_araddr;
+                        bresp_r  <= 2'b00;
+                        rresp_r  <= 2'b00;
                         st       <= S_RDQ;
                     end else if (aw_got && w_got) begin
+                        bresp_r  <= 2'b00;
                         st       <= S_WRQ;
                     end
                 end
@@ -138,12 +159,49 @@ module axil_slave (
                         aw_got <= 1'b0;        // 事务已发起，释放两个通道
                         w_got  <= 1'b0;
                         st     <= S_WB;
+                        tmo_cnt <= 16'd0;
+                    end else if (tmo_cnt >= (GNT_TMO - 1)) begin
+                        // ★ 授权超时：回 SLVERR 放行，绝不挂死主机
+                        aw_got  <= 1'b0;
+                        w_got   <= 1'b0;
+                        bresp_r <= 2'b10;      // SLVERR
+                        st      <= S_WB;
+                        tmo_cnt <= 16'd0;
+                    end else begin
+                        tmo_cnt <= tmo_cnt + 16'd1;
                     end
                 end
-                S_WB:   if (s_axil_bready) st <= S_IDLE;
-                S_RDQ:  if (m_gnt) st <= S_RW;
-                S_RW:   if (m_rvalid) begin rdata_r <= m_rdata; st <= S_RB; end
-                S_RB:   if (s_axil_rready) st <= S_IDLE;
+                S_WB: if (s_axil_bready) begin st <= S_IDLE; tmo_cnt <= 16'd0; end
+                S_RDQ: begin
+                    if (m_gnt) begin
+                        st      <= S_RW;
+                        tmo_cnt <= 16'd0;
+                    end else if (tmo_cnt >= (GNT_TMO - 1)) begin
+                        rdata_r <= 32'h0;
+                        rresp_r <= 2'b10;      // SLVERR
+                        st      <= S_RB;
+                        tmo_cnt <= 16'd0;
+                    end else begin
+                        tmo_cnt <= tmo_cnt + 16'd1;
+                    end
+                end
+                S_RW: begin
+                    if (m_rvalid) begin
+                        rdata_r <= m_rdata;
+                        rresp_r <= 2'b00;
+                        st      <= S_RB;
+                        tmo_cnt <= 16'd0;
+                    end else if (tmo_cnt >= (GNT_TMO - 1)) begin
+                        // ★ 等返回超时：同样回 SLVERR，不让主机等死
+                        rdata_r <= 32'h0;
+                        rresp_r <= 2'b10;
+                        st      <= S_RB;
+                        tmo_cnt <= 16'd0;
+                    end else begin
+                        tmo_cnt <= tmo_cnt + 16'd1;
+                    end
+                end
+                S_RB: if (s_axil_rready) begin st <= S_IDLE; tmo_cnt <= 16'd0; end
                 default: st <= S_IDLE;
             endcase
         end

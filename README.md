@@ -38,7 +38,7 @@
   - 前序：[`docs/历史/CHECKPOINT_v12.md`](docs/历史/CHECKPOINT_v12.md)、[`docs/历史/CHECKPOINT_v13.md`](docs/历史/CHECKPOINT_v13.md)、
     [`docs/历史/IMPLEMENTATION_v10.md`](docs/历史/IMPLEMENTATION_v10.md)、[`docs/历史/IMPLEMENTATION_v11.md`](docs/历史/IMPLEMENTATION_v11.md)
   - 工具链与 RTOS：[`docs/C_工具链与RTOS.md`](docs/C_工具链与RTOS.md)；串口/GPIO：[`docs/串口与console.md`](docs/串口与console.md)
-  - 产品级汇总：[`docs/产品报告_v17.docx`](docs/产品报告_v17.docx)（18 页：规格、关键技术、性能、资源时序、验证、风险与路线图）
+  - 产品级汇总：[`docs/产品手册_v18.md`](docs/产品手册_v18.md)（另有 `docs/产品手册_v18.docx` / `.pdf`）。上一版 [`docs/产品报告_v17.docx`](docs/产品报告_v17.docx)（18 页）仍在仓库里，v18 手册已覆盖其全部内容
 
 ### 0.2 怎么跑（v17）
 

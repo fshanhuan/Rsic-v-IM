@@ -64,7 +64,7 @@ module soc_bus #(
     output logic        hit_dram,
     output logic        hit_code,
     output logic        hit_mmio,
-    output logic [ 3:0] mmio_idx,
+    output logic [ 5:0] mmio_idx,
 
     /* ---- 已按片选门过的读使能 ---- */
     output logic        re_dram,
@@ -99,8 +99,12 @@ module soc_bus #(
     endgenerate
 
     assign hit_default = 1'b0;
-    // ★ A2：4 位（addr[5:2]）—— 3 位时 0x20 会和 0x00 别名（magic 0xF0 撞 LED 就是这么来的）
-    assign mmio_idx = addr[5:2];
+    // ★ S0：6 位（addr[7:2]）。4 位时 16 个寄存器编号（0x00–0x3C）已全部占满，
+    //   记录仪要加的 I2C / HDMI / XADC / 列缓冲一个都放不进去。
+    //   0x00–0x3C 的旧编号、语义、时序**完全不变**（只是比较位宽变宽）。
+    //   新增空间是 0x40–0xFC；0x100 起会回卷到 0x00（索引只有 6 位）。
+    //   副作用（好的那种）：停机 magic 写 0x1000_00F0 不再误写 MTIME。
+    assign mmio_idx = addr[7:2];
 
     /* --------------------------- 使能分发 ---------------------------------
      * 写：`we & hit` —— 这就是老不变量的新家。

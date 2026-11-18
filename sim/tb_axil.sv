@@ -14,6 +14,10 @@
  *   T4 握手规矩：bvalid/rvalid 在 bready/rready 之前不许自己掉
  *   T5 背靠背：写紧跟读（同一个 RTL 状态机回到 IDLE）
  *   T6 未写过的地址读回 0
+ *   T7 授权被拖住 6 拍：m_req 保持、事务只发生一次
+ *   T8 AW 与 W 相隔 3 拍（真实主机的通道分离）
+ *   T9 授权**永久**扣住：超时回 SLVERR、限时放行（不挂死主机）★2026-11-18 加
+ *   T10 超时之后桥能自恢复（授权回来照常读写）★2026-11-18 加
  *
  * 用法： vvp sim/build/tb_axil.vvp
  * ============================================================================= */
@@ -114,6 +118,42 @@ module tb_axil;
         end
     endtask
 
+    // ★ T9/T10/T11（2026-11-18 加）：授权被永久扣住时，桥必须回 SLVERR 而不是把主机挂死。
+    //   上板教训：PS 的 AXI 主机会因为一笔永远收不到响应的事务把整个 PS 互连锁死。
+    task automatic axi_write_resp(input [31:0] a, input [31:0] d, input [3:0] s,
+                                  output [1:0] resp, output integer waited);
+        begin
+            waited = 0;
+            @(negedge aclk);
+            awaddr = a; wdata = d; wstrb = s; awvalid = 1'b1; wvalid = 1'b1;
+            do @(posedge aclk); while (!(awready && wready));
+            @(negedge aclk);
+            awvalid = 1'b0; wvalid = 1'b0;
+            bready  = 1'b1;
+            do begin @(posedge aclk); waited = waited + 1; end while (!bvalid);
+            resp = bresp;
+            @(negedge aclk);
+            bready  = 1'b0;
+        end
+    endtask
+
+    task automatic axi_read_resp(input [31:0] a, output [31:0] d,
+                                 output [1:0] resp, output integer waited);
+        begin
+            waited = 0;
+            @(negedge aclk);
+            araddr = a; arvalid = 1'b1;
+            do @(posedge aclk); while (!arready);
+            @(negedge aclk);
+            arvalid = 1'b0;
+            rready  = 1'b1;
+            do begin @(posedge aclk); waited = waited + 1; end while (!rvalid);
+            d = rdata; resp = rresp;
+            @(negedge aclk);
+            rready  = 1'b0;
+        end
+    endtask
+
     // ★ 真实主机（PS 经 axi_protocol_converter）是**先给 AW、握手完成后再给 W**。
     //   这个任务专门测通道分离：AW 与 W 之间故意隔 gap 拍。
     //   原来"两个通道必须同拍"的实现会在这里死锁（板上实测就卡在这）。
@@ -185,6 +225,9 @@ module tb_axil;
     endtask
 
     logic [31:0] d1, d2, d3, d4;
+    logic [1:0]  resp9, resp9r;
+    integer      waited9, waited9r;
+    logic [31:0] d9;
     initial begin
         $display("================================================================");
         $display(" tb_axil : axil_slave protocol / function test");
@@ -239,6 +282,23 @@ module tb_axil;
         join
         axi_read(32'h0000_0050, d4);
         chk("T7 write survives delayed grant", d4 == 32'hFEED_FACE);
+
+        // ---- T9：授权被永久扣住 → 必须回 SLVERR 且限时放行（不能挂死主机）----
+        gnt_enable = 1'b0;
+        axi_write_resp(32'h0000_0070, 32'h1234_ABCD, 4'hF, resp9, waited9);
+        chk("T9 write timeout returns SLVERR", resp9 == 2'b10);
+        chk($sformatf("T9b write timeout bounded (%0d cyc)", waited9),
+            waited9 <= 200);
+
+        axi_read_resp(32'h0000_0070, d9, resp9r, waited9r);
+        chk("T9c read timeout returns SLVERR", resp9r == 2'b10);
+        chk("T9d read timeout data is 0", d9 == 32'h0000_0000);
+
+        // ---- T10：超时之后桥必须能自动恢复（授权回来照常工作）----
+        gnt_enable = 1'b1;
+        axi_write(32'h0000_0074, 32'hC0FF_EE01, 4'hF);
+        axi_read (32'h0000_0074, d4);
+        chk("T10 bridge recovers after timeout", d4 == 32'hC0FF_EE01);
 
         $display("----------------------------------------------------------");
         if (nfail == 0) $display("[AXIL-SELFCHECK] status=PASS (%0d checks)", npass);

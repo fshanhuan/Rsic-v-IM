@@ -39,6 +39,13 @@ module board_top #(
     parameter DRAM_WORDS = 32768,
     // 程序镜像（hex 文本，$readmemh 载入 IROM；Vivado 会把它变成 BRAM 初值）
     parameter IROM_INIT  = "prog.hex",
+    // ★ 记录仪（v9_rec）：DRAM 初值镜像。
+    //   空字符串 = 不加载（v18/v11 行为**逐位不变**，DRAM 全 0，由软件自己初始化）。
+    //   为什么要它：记录仪产品要"上电即跑"，镜像里的 .rodata/.data 必须在综合时固化进
+    //   DRAM 的 BRAM 初值，否则软件只能靠串口把数据灌进 DRAM（J8 没通时上不了板）。
+    //   文件是 32768 行全量镜像（tools/mk_boot_image.py 生成），全 0 处也是全 0 ——
+    //   与"BRAM 上电为 0"完全等价，只是把这件事写进比特流，不依赖上电状态。
+    parameter DRAM_INIT  = "",
     // ★ v12（A）：串口引导开关。
     //   0 = 保持 v11 的行为：IROM 是**只读** BRAM，程序在综合时固化（改程序要重跑 33min）；
     //   1 = IROM 变**可写**，由 boot_loader 经 uart_rx 灌入镜像（改程序 ~1 s）。
@@ -68,7 +75,14 @@ module board_top #(
      * NOTE: this uses a plain 32-bit array (NOT a true-dual-port byte-lane array),
      *       because Vivado cannot infer BRAM for the latter (Synth 8-3391) and
      *       xvlog needs >400 s to compile it. See docs/AXI_总线化_6_7.md. */
-    parameter AXIL_EN = 0
+    parameter AXIL_EN = 0,
+    /* ★ 记录仪项目：通用 MMIO 扩展口。
+     *   1 = 把 idx >= 16 的 MMIO 读写转发给外部模块（board/rec_mmio.sv）。
+     *   0 = 与 v18 逐位相同（默认值不变，v9_boot 的网表不受影响）。
+     *   为什么要留这个口：board_top 是全工程共用的 SoC，记录仪的外设只属于
+     *   那个项目，不该把它的寄存器塞进这里；开一个通用转发口，
+     *   想加多少寄存器就加多少（6 位索引还有 48 个空位）。 */
+    parameter EXT_MMIO = 0
 ) (
     input  logic        sys_clk,
     input  logic        btn_rst_n,     // 板卡按键复位，低有效（建议先消抖）
@@ -161,7 +175,15 @@ module board_top #(
     output logic [31:0] s_axil_rdata,
     output logic [1:0]  s_axil_rresp,
     output logic        s_axil_rvalid,
-    input  logic        s_axil_rready
+    input  logic        s_axil_rready,
+
+    /* ---- 记录仪：通用 MMIO 扩展口（只在 EXT_MMIO=1 时有效）----
+     * ext_we 已经在 MMIO 片选之内、并且限定 idx >= 16；
+     * ext_rdata 由外部模块按 idx 返回，未命中必须给 0。 */
+    output logic        ext_we,
+    output logic [5:0]  ext_idx,
+    output logic [31:0] ext_wdata,
+    input  logic [31:0] ext_rdata
 );
 
     /* ---------------- 1) 复位：异步置位、同步释放 ---------------- */
@@ -223,7 +245,7 @@ module board_top #(
      * 再"减掉"它们（`perip_wen & ~mmio_sel & ~irom_win_sel`）。现在这三件事
      * 全在 soc_bus 里，加外设不用再改这里。 */
     logic        bus_hit_dram, bus_hit_code, bus_hit_mmio;
-    logic [ 3:0] bus_mmio_idx;
+    logic [ 5:0] bus_mmio_idx;   // S0：4→6 位（addr[7:2]），64 个 MMIO 寄存器
     logic        bus_re_dram, bus_re_code;
     logic        bus_we_dram, bus_we_code, bus_we_mmio;
     logic        bus_unmapped;
@@ -263,6 +285,28 @@ module board_top #(
         .we_mmio    (bus_we_mmio),
         .unmapped   (bus_unmapped)
     );
+
+    /* =========================================================================
+     * ★ 2026-11-17 记录仪调试笔记（**未采用**，留证据）
+     * -------------------------------------------------------------------------
+     * 怀疑点是"MMIO 读数据比同步 BRAM 早一拍"。实测（sim/tb_recorder.sv 逐拍打印）：
+     *   T   拍：发 0x1000_0094 的读（rd_req=1），DCache 让 LSU hold=1
+     *   T+1 拍：resp_for_now=1，hold=0，cpu_rdata=0x00000400 ← **DCache 这一侧是对的**
+     * 也就是说 DCache 在放行那一拍给的数据完全正确，可软件里 `lw t2,0x94` 写回 t2 的
+     * 仍然是 0/1（= 上一个地址 0x84 的 bank 值）。所以错位发生在 **DCache 之后**
+     * （LSU 采 rdata 的时刻 / rdata_reg2 的取舍），不在这里。
+     * 结论：本段保持 v18 原样（不加寄存器），避免无依据地改核心时序。
+     * 复现与进一步定位见 docs/记录仪_HDMI_方案.md §25。
+     * ====================================================================== */
+
+    /* ---------------- 2b-2) 记录仪：MMIO 扩展口转发 ----------------
+     * idx >= 16 的读写交给外部模块（board/rec_mmio.sv）。
+     * ★ EXT_MMIO=0 时 ext_we 恒 0、ext_rdata 不进 mux —— 网表与 v18 逐位相同。
+     * ★ 只在"写真的发生"那一拍给 ext_we（bus_we_mmio 已经含片选），
+     *   读走的是地址译码（与其它外设一样，不需要 ren）。 */
+    assign ext_we    = EXT_MMIO && bus_we_mmio && (bus_mmio_idx >= 6'd16);
+    assign ext_idx   = bus_mmio_idx;
+    assign ext_wdata = perip_wdata;
 
     // v12（B）：myCPU 侧的状态字（只驱动低 8 位）+ 拍计数器
     logic [31:0] debug_status_cpu;
@@ -739,7 +783,11 @@ module board_top #(
             `SOC_MMIO_IDX_MTIMECMPH: mmio_rdata = 32'b0;
             // ---- 双核协同：控制寄存器回读（bit1 = irq_ps 当前电平）----
             `SOC_MMIO_IDX_CTL:       mmio_rdata = {30'b0, irq_ps_r, 1'b0};
-            default:              mmio_rdata = 32'b0;   // TXDATA/LED/BOOTREQ/RXPOP/IRQSW 读回 0
+            default:              mmio_rdata = (EXT_MMIO && (bus_mmio_idx >= 6'd16))
+                                              ? ext_rdata : 32'b0;
+                                  // TXDATA/LED/BOOTREQ/RXPOP/IRQSW 读回 0
+                                  // ★ S0 之后 idx 有 6 位，16 及以上是扩展区，
+                                  //   转发给 rec_mmio；EXT_MMIO=0 时仍是 0（v18 行为）
         endcase
     end
 
@@ -764,7 +812,7 @@ module board_top #(
             sync_mem #(
                 .WORDS     (DRAM_WORDS),
                 .READ_ONLY (0),
-                .INIT_FILE ("")
+                .INIT_FILE (DRAM_INIT)
             ) dram_inst (
                 .clk   (sys_clk),
                 .reset (1'b0),
@@ -857,7 +905,7 @@ module board_top #(
 
             dram_shared #(
                 .WORDS     (DRAM_WORDS),
-                .INIT_FILE ("")
+                .INIT_FILE (DRAM_INIT)
             ) dram_inst (
                 .clk   (sys_clk),
                 .reset (1'b0),
