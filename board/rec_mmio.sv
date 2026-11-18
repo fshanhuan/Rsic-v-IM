@@ -225,7 +225,7 @@ module rec_mmio (
     always_ff @(posedge clk) begin
         if (rst) begin
             dac_wr        <= 1'b0;
-            dac_data_r    <= 8'hFF;   // 反相输出 → 0xFF 才是 0 V，见 dac0832.sv
+            dac_data_r    <= 8'hFF;   // =满量程 3.98V（非反相，见 dac0832.sv）；必须经分压接 XADC
             adc_en_r      <= 1'b1;   // 默认自由采样：这样不打软件也能从 JTAG 看到样本
             adc_clr_ovf_r <= 1'b0;
             adc_rd_en_r   <= 1'b0;

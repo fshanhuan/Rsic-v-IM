@@ -6,7 +6,8 @@
  * 做的事：
  *   1) 打印 ADC 状态（full / overflow / level / cnt / last）
  *   2) 依次写 DAC 码值 0xFF 0xC0 0x80 0x40 0x00，每档读几次 ADC 最新值
- *      —— DAC 输出经 LM324 **反相**，所以码值越大输出越低，ADC 读数也越低
+ *      —— DAC 的 VREF 是**负的**（-3.98V）送进反相运放 → 输出为正、不反相：
+ *         码值越大输出电压越高，ADC 读数也越高（手册 §17 原理图，2026-11-18 核对）
  *   3) 把采样通道临时切到**片内温度** (DRP 0x00) 读一次
  *      —— 温度通道不依赖任何外部接线，它非 0 就证明 XADC 真的在转换；
  *         如果连它都是 0，说明序列器/DRP 配置有问题，与接线无关
@@ -17,9 +18,9 @@
  *   2) shell 里： run adctest
  *
  * 期望（DAC 输出经 330Ω 串联 + 100Ω 并联到地 = 1:4.3 分压后接 AD11）：
- *   DAC=0xFF → 输出≈0.00V → 分压 0.00V  → ADC≈0x0000
+ *   DAC=0x00 → 输出 0.00V  → 分压 0.000V → ADC≈0x0000
  *   DAC=0x80 → 输出≈2.00V → 分压 0.465V → ADC≈0x076F
- *   DAC=0x00 → 输出≈3.98V → 分压 0.926V → ADC≈0x0ECF
+ *   DAC=0xFF → 输出≈3.98V → 分压 0.926V → ADC≈0x0ECF
  * ★ 分压比必须 ≥1:4：1:3 得到 1.33V，仍然超 1V 量程。
  * ★ 330Ω 必须在 DAC 侧（串联）、100Ω 到地（并联）；接反 → 3.07V，会打坏 XADC。
  * ★ 没有分压直接接 AD11 会过压（手册：这两个脚只支持 0~1 V）。
@@ -151,35 +152,33 @@ int main(void)
         }
     }
 
-    /* 3) DAC 扫频：码值从 0xFF 到 0x00（输出由低到高） */
+    /* 3) DAC 扫频：码值 0x00 → 0xFF（输出由 0 V 升到满量程，非反相） */
     R_ADC_CH = CH_AD11;            /* 恢复 AD11 */
     delay(200000);
 
-    puts_("-- DAC sweep (输出反相：码值越大电压越低) --\r\n");
-    puts_("DAC  ADC    mV   note\r\n");
+    puts_("-- DAC sweep (VREF=-3.98V 进反相运放 -> 码值越大电压越高) --\r\n");
+    puts_("DAC   ADC   mV  expect_mV\r\n");
 
-    static const unsigned int codes[5] = { 0xFFu, 0xC0u, 0x80u, 0x40u, 0x00u };
+    static const unsigned int codes[5] = { 0x00u, 0x40u, 0x80u, 0xC0u, 0xFFu };
     for (int k = 0; k < 5; k++) {
         R_DAC = codes[k];
         delay(400000);              /* 等 DAC 稳定 + 让 ADC 采样几次 */
 
         unsigned int v = adc_avg8();   /* 左对齐原始值 */
+        /* DAC 输出 = 3.98V * code/255；再经 1:4.3 分压，就是 ADC 该看到的电压 */
+        unsigned int mv_dac = (3980u * (codes[k] & 0xFFu)) / 255u;
+        unsigned int mv_exp = (mv_dac * 10u) / 43u;
+
         puts_("0x"); put_hex8(codes[k]);
         puts_(" 0x"); put_hex16(v);
         puts_("  ");   put_dec(code_to_mv(v));
-        puts_("  ");
-
-        /* DAC 输出电压估计：V = 3.98V * (255-code)/255，反相后 */
-        {
-            unsigned int mv_dac = (3980u * (255u - (codes[k] & 0xFFu))) / 255u;
-            puts_("dac~"); put_dec(mv_dac); puts_("mV");
-        }
+        puts_("  ");   put_dec(mv_exp);
         puts_("\r\n");
     }
 
-    /* 4) 收尾：DAC 回到安全值 0xFF（≈0 V），避免输出长期顶在高压 */
-    R_DAC = 0xFFu;
-    puts_("DAC restored to 0xFF (safe, ~0V)\r\n");
+    /* 4) 收尾：DAC 回到 0x00（≈0 V，真正的安全值） */
+    R_DAC = 0x00u;
+    puts_("DAC restored to 0x00 (~0V)\r\n");
     puts_("== adctest done ==\r\n");
 
     return 0;
