@@ -4603,3 +4603,47 @@ Phase 5.5 五轮全局迭代跑完，又开了**第二轮**（Phase 17），仍�
    要继续查就得两个万用表读数（§49.12），这一步必须人到现场。
 
 `_diag/s2_play_curve.csv` 是完整 256 行（含 `seencnt`），可直接画图。
+
+---
+
+## 50. S5 侧的一个误诊：APB 卡死 ≠ 必须断电（2026-11-19 21:30）
+
+插卡前先做了一次现场检查，`_diag/_dap_probe.tcl` 的输出是：
+
+```
+apb_ok (initial) = 0
+== try: rst -dap ==        （没有 *DAP* 目标，跳过）
+apb_ok after rst -dap = 0
+apb_ok after rst -system = 0
+apb_ok after rst -processor = 1        ← 恢复了
+write/read test: 3405691582            ← 0xCAFEBABE，读写都对
+```
+
+也就是说：**板子现在是可用的**，`rst -processor` 就能把调试 APB 救回来。
+
+而 `tools/ps/sd_session.ps1` 的 preflight 原来只认 `apb_ok (initial) = 1`，
+碰到这种情况会打印 `debug APB dead -- POWER CYCLE the board` —— 这是**误诊**，
+会让人白拆一次电源（而断电本身是有代价的：卡必须在上电瞬间就位，多断一次就多一次失败机会）。
+
+改成：
+
+| 情况 | 判定 |
+|---|---|
+| `apb_ok (initial) = 1` | PASS（debug APB reachable）|
+| 任一步复位后 `= 1` | PASS，并注明是哪一步（`recovered by rst -processor`）|
+| 三种复位都还不通 | FAIL → 才建议断电 |
+
+实测（21:30，`-Mode Card`）：
+
+```
+[PASS] preflight : debug APB recovered by rst -processor
+[FAIL] sd_bit : no usable card response (ncr=64, 64 = nothing on the line)
+```
+
+第二条是**预期**的：`ncr=64` + `waitbits=0xffffffff` = 64 个时钟内 CMD 线全程为高 = 卡槽里没有卡。
+
+所以 S5 现在只剩"物理上插卡 + 一次真上电"这一步，其余全部就绪。
+
+> 教训：**"状态通不过检查"和"设备坏了"是两件事。**
+> 一个只认"初始状态就正常"的前置检查，会把"能被复位救回来"误报成"必须换电源"。
+> 判据应该写成"**最终能不能用**"，而不是"一开始是不是好的"。

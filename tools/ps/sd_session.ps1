@@ -106,8 +106,20 @@ Start-Sleep -Seconds 2
 
 Say "== [preflight] board debug APB =="
 $probe = & $Xsdb _diag\_dap_probe.tcl 2>&1 | Out-String
-$apbOk = ($probe -match 'apb_ok \(initial\) = 1')
-if (-not $apbOk) {
+# 2026-11-19 21:30 改：原来只认 `apb_ok (initial) = 1`，实测出现过
+#   initial=0 但 `rst -processor` 之后 =1（APB 又能读了，读写测试 0xCAFEBABE 通过）。
+#   这时报 "POWER CYCLE" 是**误诊** —— 板子其实已经可用。
+#   所以判据改成：initial 通，或者任何一步复位之后通了，都算 PASS，并把是哪一步练出来。
+$apbInit = ($probe -match 'apb_ok \(initial\) = 1')
+$apbAfter = [regex]::Match($probe, 'apb_ok after (.+?) = 1')
+if ($apbInit -or $apbAfter.Success) {
+    if ($apbInit) {
+        Add-Result 'preflight' 'PASS' 'debug APB reachable (initial)'
+    } else {
+        Add-Result 'preflight' 'PASS' ("debug APB recovered by " + $apbAfter.Groups[1].Value.Trim())
+        Say "  (initial 时 APB 是死的，执行 $($apbAfter.Groups[1].Value.Trim()) 之后恢复)"
+    }
+} else {
     Add-Result 'preflight' 'FAIL' 'debug APB dead -- POWER CYCLE the board (unplug DC 5 s)'
     Say ""
     Say "The PS debug access port is stuck (rst -dap / -system / -processor do not clear it)."
@@ -115,7 +127,6 @@ if (-not $apbOk) {
     $results | Format-Table -AutoSize | Out-String | Write-Host
     exit 1
 }
-Add-Result 'preflight' 'PASS' 'debug APB reachable'
 
 # ------------------------------------------------------------------ helper: run one board app
 function Run-App($app, $waitMs, $logName) {

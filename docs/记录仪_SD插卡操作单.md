@@ -45,15 +45,22 @@ RESULT PASS (card validated end to end)
 
 `diff=0` 和最后一行 `RESULT PASS` 就是"卡上文件和导出逐字节一致"的凭据。
 
+> 2026-11-19 21:30 补：preflight 那一行也可能长这样 ——
+> `[PASS] preflight : debug APB recovered by rst -processor`
+> 这是**正常的**（板子上电后调试口偶发卡住，`rst -processor` 能救回来，
+> 实测恢复后读写测试 `0xCAFEBABE` 通过）。只有**三种复位都救不回来**才需要断电。
+
 ---
 
 ## 四、卡住了怎么办（三种典型情况）
 
-### 情况 A：第一步就 `[FAIL] preflight : debug APB dead`
+### 情况 A：`[FAIL] preflight : debug APB dead`
 
-板子的 PS 调试口卡死了，软件复位救不回来。
+板子的 PS 调试口卡死了，`rst -dap` / `-system` / `-processor` 三种都试过仍不通。
 
 **做法**：拔 DC，等 5 秒，插上（**卡要在这次上电时就位**），再跑一次。
+
+> 注意区分：如果 preflight 显示 `recovered by ...`，那**不是**情况 A，板子是好的，别去断电。
 
 ### 情况 B：`[FAIL] sd_bit : no usable card response (ncr=64 ...)`
 
