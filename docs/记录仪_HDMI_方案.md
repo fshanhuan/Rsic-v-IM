@@ -4944,6 +4944,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\ps\hdmi_grab.ps1 -Tag 
 > 判据必须是"一段时间窗口内的占空比"，而不是"某一时刻采样到的一位"。
 > 加上这个计数器的代价是 20 行 RTL，省掉的是三次白建的 40 分钟。
 
+### 52.10 补进回归：ADV7511 状态机以前**根本没被回归覆盖**（03:43）
+
+改完 `adv7511_init.sv` 的 NACK 分支才发现：`_diag/regress.ps1` 的 56 项里
+**没有 `tb_adv7511_init`** —— 也就是说这个状态机的任何改动都不会被回归拦住。
+
+`tb_adv7511_init.sv` 本来就有一个 `+noslave` 模式（器件不在），正好覆盖 NACK 那条路。
+于是把它两条都加进回归：
+
+| 新加的 run | 覆盖什么 | 结果 |
+|---|---|---|
+| `tb_adv7511_init i2c` | 器件在（会 ACK）→ 整表 14 项写完、`done=1` | **PASS**（13 项检查）|
+| `tb_adv7511_init i2c-nack` | `+noslave` → `no_dev=1` / `done=0` / `ack_err` 增长、重试循环还在跑 | **PASS**（3 项检查）|
+
+回归从 **56 → 58 项，ALL PASS**：
+
+```
+[REGRESSION] ALL PASS (58 runs)
+EXITCODE=0
+```
+
+> 顺带又踩了一次编码坑：`_diag/regress.ps1` 里有中文注释，我把它改写成**没有 BOM 的
+> UTF-8**，PowerShell 5.1 按 OEM 936 解码 → 满屏乱码 → `UnexpectedToken` 解析失败。
+> 加回 BOM 立刻就好。**这个坑今晚已经踩第二次了**（第一次是 `.ps1` 里的中文）；
+> 规矩应该是：**任何含中文的 .ps1 一律带 BOM 存，或者干脆只用 ASCII**。
+
 ---
 
 ## 53. S5 补真 ADC：方案 A 的第一版位流是**错**的（IP 仓库同名遮蔽）
