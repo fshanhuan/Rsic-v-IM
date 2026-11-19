@@ -43,7 +43,18 @@
 static u16 samp[NSAMP_MAX] __attribute__((aligned(4)));
 static u8  blk[512] __attribute__((aligned(4)));
 
-/* 弹出最多 max 个样本；返回实际拿到的个数。adc_cnt 前后差值写进 out 指针。 */
+/* 弹出最多 max 个样本；返回实际拿到的个数。adc_cnt 前后差值写进 out 指针。
+ *
+ * ★★ 2026-11-20 00:30 修两个真 bug（没有卡也能测出来：抓满 buffer 后直接 JTAG dump）：
+ *   1) **idx35(0x8C) 读只是"窥视"队头，不会弹出** —— 弹出必须写 idx38(0x98) 的 bit2。
+ *      原来的代码只读不弹，于是 1024 个样本全是**同一个队头值**（实测全 3706）。
+ *      正确序列：peek -> pop -> DSB（等写落地）-> 下一个 peek。
+ *      依据：tools/ps/arm_drain.tcl 头注释（"idx35 读 = FIFO 队头（只窥视）"）+
+ *      board/rec_mmio.sv 的 `adc_rd_en_r <= wdata[2]`。
+ *   2) **XADC 结果是左对齐的 16 位**，12 位码在 [15:4]。原代码 `& 0x0FFF` 取的是
+ *      **低 12 位**（实测拿到 3706 = 0xE7A，正好是 0x9E7A 的低位），应该 `>> 4`。
+ *      （假 DRP 时代这条路径从没跑过 —— 只有 sd_fat_sd_syn 跑过，它不走 capture()。）
+ */
 static u32 capture(u32 max, u32 *cnt_before, u32 *cnt_after)
 {
     u32 n = 0U;
@@ -60,7 +71,12 @@ static u32 capture(u32 max, u32 *cnt_before, u32 *cnt_after)
         if (guard >= 200000U) {
             break;                          /* FIFO 空了：正常结束 */
         }
-        samp[n] = (u16)(Xil_In32(REC_DATA) & 0x0FFFU);
+        /* 左对齐 16 位 -> 12 位码 */
+        samp[n] = (u16)((Xil_In32(REC_DATA) >> 4) & 0x0FFFU);
+        /* 弹出：写 bit2；bit0 在 bit2=1 时被忽略（见 rec_mmio），所以 en 不受影响 */
+        Xil_Out32(REC_CTL, 0x5U);
+        /* 写是 posted 的：不等它落地就 peek 会又读到同一个队头 */
+        __asm__ volatile ("dsb sy" ::: "memory");
         n++;
     }
 
