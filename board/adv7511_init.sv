@@ -108,6 +108,7 @@ module adv7511_init #(
     logic [ 4:0] idx;
     logic [ 7:0] cur_reg, cur_val;
     logic [ 7:0] nack_byte;            // 最近 NACK 的字节（调试）
+    logic        abort_done;            // S_WAIT 里那句 STOP 有没有发完（§52.9）
     logic [31:0] wait_cnt;
 
     /* ★ 函数调用不能直接取位段（tbl(idx)[15:8] 是语法错），必须先落到一条线上；
@@ -119,6 +120,7 @@ module adv7511_init #(
         if (rst) begin
             st         <= S_IDLE;
             waiting    <= 1'b0;
+            abort_done <= 1'b0;
             idx        <= 5'd0;
             cur_reg    <= 8'h00;
             cur_val    <= 8'h00;
@@ -154,6 +156,7 @@ module adv7511_init #(
                         no_dev   <= 1'b1;
                         ack_err  <= 16'd0;
                         wait_cnt <= 32'd0;
+                        abort_done <= 1'b0;
                         st       <= S_START;
                     end
                 end
@@ -260,13 +263,36 @@ module adv7511_init #(
                 end
 
                 S_WAIT: begin
-                    /* 等 RETRY 之后整表重来（例如用户中途插上显示器） */
+                    /* ★★ 2026-11-20 02:20 修：等重试之前**必须先发一个 STOP**。
+                     * -----------------------------------------------------------------
+                     * 原来的流程是"地址 NACK → 直接进 S_WAIT 等 200 ms → 再来一次 START"。
+                     * 问题在于：字节结束时按 i2c_master 的约定总线停在 **SCL 低、SDA 释放**，
+                     * 而 NACK 过的从机会**卡在那个字节中间、一直拉低 SDA** —— 于是 200 ms
+                     * 里 SCL 被主机按着、SDA 被从机按着，**总线死锁**；下一轮 START 也
+                     * 建立不起来，永远 NACK。
+                     *
+                     * 硬件实测（新增 21 ms 占空比计数，§52.9）：
+                     *   SCL = 0/1048576、SDA = 0/1048576  —— 两根线在整个窗口里**都没高过**。
+                     *   SCL 低可以由"等待期主机不放线"解释，**SDA 也为 0 只能是从机在按**。
+                     *
+                     * 修法：进 S_WAIT 后先发 STOP（合法的总线释放），等它 done，再开始计时。
+                     * 这是 I2C 的标准恢复动作，对"从机中途复位""器件后插上"都有效。
+                     * ----------------------------------------------------------------- */
                     busy <= 1'b0;
-                    if (wait_cnt >= RETRY_CY[31:0]) begin
-                        wait_cnt <= 32'd0;
-                        idx      <= 5'd0;
-                        busy     <= 1'b1;
-                        st       <= S_START;
+                    if (!abort_done) begin
+                        if (!waiting) begin
+                            m_stop  <= 1'b1;
+                            waiting <= 1'b1;
+                        end else if (m_done) begin
+                            waiting    <= 1'b0;
+                            abort_done <= 1'b1;
+                        end
+                    end else if (wait_cnt >= RETRY_CY[31:0]) begin
+                        wait_cnt   <= 32'd0;
+                        abort_done <= 1'b0;
+                        idx        <= 5'd0;
+                        busy       <= 1'b1;
+                        st         <= S_START;
                     end else begin
                         wait_cnt <= wait_cnt + 32'd1;
                     end

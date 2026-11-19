@@ -53,6 +53,28 @@ P [format "T0: done=%d no_dev=%d busy=%d idx=%2d reg=0x%02X val=0x%02X ack_err=%
         [rd init_done] [rd init_no_dev] [rd init_busy] [rd init_idx] [rd init_reg] [rd init_val] $e0]
 P [format "T0: hdmi_scl=%d hdmi_sda=%d  line_health=0x%02X  f_h=0x%04X f_a=0x%04X" \
         [rd hdmi_scl_rd] [rd hdmi_sda_rd] [rd line_health] [rd f_h] [rd f_a]]
+
+# 2026-11-20：占空比计数（probe_in40/41, 20 位，窗口 2^20 拍 ≈ 21 ms）。
+# 这两个数把"线是高还是低"变成数字，**不受 JTAG 采样时刻影响** —— 1 位探针
+# 采到 0 可能只是刚好停在驱动低电平那一小段（§52.2 的教训）。
+if {[has scl_hi_cnt] && [has sda_hi_cnt]} {
+    set sc [rd scl_hi_cnt]
+    set sd [rd sda_hi_cnt]
+    set w  [expr {1048576.0}]
+    set pc_s [expr {100.0 * $sc / $w}]
+    set pc_d [expr {100.0 * $sd / $w}]
+    P [format "T0: 占空比 SCL=%d/1048576 (%.2f%%)  SDA=%d/1048576 (%.2f%%)  \[窗口 21 ms\]" \
+            $sc $pc_s $sd $pc_d]
+    if {$sc > 1000000 && $sd > 1000000} {
+        P "T0: => 两根线都是**空闲高**：上拉活着、没人按住（之前的 BUS_HELD_LOW 是采样偏差）"
+    } elseif {$sc < 1000 && $sd < 1000} {
+        P "T0: => 两根线**确实被按住**（都是低）"
+    } else {
+        P "T0: => 有周期性总线活动（init 重试），占空比见上"
+    }
+} else {
+    P "T0: (没有 scl_hi_cnt/sda_hi_cnt 探针 -- 板上不是带占空比计数的位流)"
+}
 P [format "T0: 视频流水线 mmcm=%d pix=%d  frame_clk=%d lines=%d de_pix=%d hs_low=%d vs_low=%d" \
         [rd mmcm_locked] [rd pix_locked] [rd m_frame_clk] [rd m_frame_lines] [rd m_de_pix] [rd m_hs_low] [rd m_vs_low]]
 
