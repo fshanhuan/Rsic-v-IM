@@ -161,7 +161,13 @@ module tb_recorder;
         .trig_th (trig_th), .trig_mode (trig_mode), .trig_en (trig_en),
         .trig_clear (trig_clear),
         .trig_fired (1'b0), .trig_above (1'b0), .trig_cnt (32'd0),
-        .meas_min (meas_min), .meas_max (meas_max), .meas_mean (meas_mean), .meas_cnt (meas_cnt)
+        .meas_min (meas_min), .meas_max (meas_max), .meas_mean (meas_mean), .meas_cnt (meas_cnt),
+        // S2b 扫描器：本台子不测它（有专门的 tb_adc_sweep），输入钉 0 避免 X 扩散
+        .sweep_start (), .sweep_abort (),
+        .sweep_ptr (), .sweep_settle (), .sweep_avg (),
+        .sweep_busy (1'b0), .sweep_done (1'b0), .sweep_ndone (9'd0),
+        .sweep_cur_code (8'd0), .sweep_rd_avg (16'd0), .sweep_rd_ok (1'b0),
+        .dac_byte_eff (dac_data)
     );
 
     /* ---------------- 真采样器 + 假 DRP ---------------- */

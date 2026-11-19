@@ -35,6 +35,7 @@
 #define SOC_MMIO_IDX_ADC_DATA    35  /* 0x8C RO  {16'b0, adc[15:0]}（读 = 弹出一个样本） */
 #define SOC_MMIO_IDX_ADC_LAST    41  /* 0xA4 RO  {16'b0, adc_last[15:0]} 最新一次转换（FIFO 满了也能看到当前值） */
 #define SOC_MMIO_IDX_ADC_LVL     37  /* 0x94 RO  FIFO 里现成的样本数 */
+#define SOC_MMIO_IDX_ADC_PAIR    58  /* 0xE8 RO  {8'b0, dac_byte[7:0], adc_last[15:0]} 同一时刻 */
 #define SOC_MMIO_IDX_ADC_ST      36  /* 0x90 RO  bit0 full bit1 overflow bit2 有数据 */
 #define SOC_MMIO_IDX_BOOTREQ     5  /* 0x14 WO  写 1 → 重新引导 */
 #define SOC_MMIO_IDX_COL_PUSH    32  /* 0x80 WO  {2'b0, max[9:0], min[9:0], col[9:0]} */
@@ -74,6 +75,13 @@
 #define SOC_MMIO_IDX_RXDATA      2  /* 0x08 RO  队头字节（不弹） */
 #define SOC_MMIO_IDX_RXPOP       6  /* 0x18 WO  写 1 → 弹出队头 */
 #define SOC_MMIO_IDX_RXSTAT      3  /* 0x0C RO  bit0 = FIFO 非空, bit1 = 溢出过 */
+#define SOC_MMIO_IDX_SWEEP_AVG   57  /* 0xE4 RW  [3:0]=log2(平均次数)，默认 4 → 16 次 */
+#define SOC_MMIO_IDX_SWEEP_CTL   52  /* 0xD0 WO  bit0 start bit1 abort（电平，内部取上升沿） */
+#define SOC_MMIO_IDX_SWEEP_CUR   59  /* 0xEC RO  当前正在测的码 */
+#define SOC_MMIO_IDX_SWEEP_DATA  54  /* 0xD8 RO  {8'b0, ptr[7:0], avg[15:0]} */
+#define SOC_MMIO_IDX_SWEEP_PTR   55  /* 0xDC RW  扫描表读指针 */
+#define SOC_MMIO_IDX_SWEEP_SETTLE 56  /* 0xE0 RW  稳定时间，单位 10 µs（默认 100 = 1 ms） */
+#define SOC_MMIO_IDX_SWEEP_ST    53  /* 0xD4 RO  [10]=busy [9]=done [8:0]=已完成条目数 */
 #define SOC_MMIO_IDX_TEXT_PUT    51  /* 0xCC WO  {line[0], col[4:0], ch[4:0]} 写一个字符单元（S6 文本层） */
 #define SOC_MMIO_IDX_TRIG_CNT    46  /* 0xB8 RO  累计触发次数 */
 #define SOC_MMIO_IDX_TRIG_CTL    44  /* 0xB0 RW  bit0 en bit1 clear bit3:2 mode(0=上升1=下降2=任意3=电平) */

@@ -46,6 +46,14 @@
  *   0xC0 / idx48  窗内最大值      RO
  *   0xC4 / idx49  窗内均值        RO
  *   0xC8 / idx50  窗口计数        RO
+ *   0xD0 / idx52  扫描控制        WO  bit0 start（电平，上升沿触发一次）bit1 abort
+ *   0xD4 / idx53  扫描状态        RO  [10]=busy [9]=done [8:0]=已完成条目数
+ *   0xD8 / idx54  扫描表读出      RO  {7'b0, ok, ptr[7:0], avg[15:0]}（ok=0 表示该条还没扫到）
+ *   0xDC / idx55  扫描读指针      RW  [7:0]
+ *   0xE0 / idx56  扫描稳定时间    RW  [15:0]，单位 10 µs（默认 100 = 1 ms）
+ *   0xE4 / idx57  扫描平均次数    RW  [3:0] = log2（默认 4 → 16 次）
+ *   0xE8 / idx58  单次同步读对    RO  {8'b0, dac_byte, adc_last} ← 一次读 = 同一时刻
+ *   0xEC / idx59  扫描当前码      RO  [7:0]
  *
  * ★ 为什么既保留上电自动探测、又给 MMIO：
  *   自动探测只跑一次（上电 2.6 ms 后，约 4 ms 完成），之后总线就空闲了；
@@ -126,7 +134,26 @@ module rec_mmio (
     input  logic [15:0] meas_min,
     input  logic [15:0] meas_max,
     input  logic [15:0] meas_mean,
-    input  logic [31:0] meas_cnt
+    input  logic [31:0] meas_cnt,
+
+    /* ---- S2b：DAC↔ADC 传输曲线扫描器（board/adc_sweep.sv）----
+     * start/abort 按"电平"输出，扫描器内部取上升沿 —— 这样 MMIO 只写一次 1
+     * 就能触发一轮，不需要软件再写 0 复位（VIO 那一路同样是电平）。
+     * ★ 两路都是电平，在 board_top_rec 里相或；所以任何一路保持高电平时，
+     *   另一路的"上升沿"就传不进去了。正常用法是软件那路只在启动瞬间写 1。 */
+    output logic        sweep_start,
+    output logic        sweep_abort,
+    output logic [ 7:0] sweep_ptr,
+    output logic [15:0] sweep_settle,
+    output logic [ 3:0] sweep_avg,
+    input  logic        sweep_busy,
+    input  logic        sweep_done,
+    input  logic [ 8:0] sweep_ndone,
+    input  logic [ 7:0] sweep_cur_code,
+    input  logic [15:0] sweep_rd_avg,
+    input  logic        sweep_rd_ok,
+    /* dac_byte = 真正送到 DAC 引脚的那个字节（可能是扫描/三角波/MMIO 三者之一） */
+    input  logic [ 7:0] dac_byte_eff
 );
 
     /* ------------------------------ 两路 I2C ------------------------------ */
@@ -302,6 +329,57 @@ module rec_mmio (
         end
     end
 
+    /* ------------------------------ S2b：扫描器控制 ------------------------------
+     * ★ 为什么把"稳定时间"和"平均次数"做成寄存器而不是写死：
+     *   分压网络后面挂着 LM324，输出阻抗不小；换分压电阻（3.3k/10k）之后稳定时间
+     *   要跟着变。做成寄存器就不用为每种接法重建位流 —— 重建一次 30 分钟。
+     * ---------------------------------------------------------------------- */
+    logic        sweep_start_r, sweep_abort_r;
+    logic [ 7:0] sweep_ptr_r;
+    logic [15:0] sweep_settle_r;
+    logic [ 3:0] sweep_avg_r;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            sweep_start_r  <= 1'b0;
+            sweep_abort_r  <= 1'b0;
+            sweep_ptr_r    <= 8'd0;
+            sweep_settle_r <= 16'd100;   // 1 ms @ 10 µs 时基
+            sweep_avg_r    <= 4'd4;      // 16 次平均（±3 LSB → ±0.75 LSB）
+        end else begin
+            if (we) begin
+                case (idx)
+                    6'd52: begin
+                        sweep_start_r <= wdata[0];
+                        sweep_abort_r <= wdata[1];
+                    end
+                    6'd55: sweep_ptr_r    <= wdata[7:0];
+                    6'd56: sweep_settle_r <= wdata[15:0];
+                    6'd57: sweep_avg_r    <= wdata[3:0];
+                    default: ;
+                endcase
+            end
+        end
+    end
+
+    assign sweep_start  = sweep_start_r;
+    assign sweep_abort  = sweep_abort_r;
+    assign sweep_ptr    = sweep_ptr_r;
+    assign sweep_settle = sweep_settle_r;
+    assign sweep_avg    = sweep_avg_r;
+
+    logic [31:0] rd_sweep;
+    always_comb begin
+        rd_sweep = 32'b0;
+        case (idx)
+            6'd53: rd_sweep = {11'b0, sweep_busy, sweep_done, sweep_ndone};
+            6'd54: rd_sweep = {7'b0, sweep_rd_ok, sweep_ptr, sweep_rd_avg};
+            6'd58: rd_sweep = {8'b0, dac_byte_eff, adc_last};
+            6'd59: rd_sweep = {24'b0, sweep_cur_code};
+            default: rd_sweep = 32'b0;
+        endcase
+    end
+
     always_comb begin
         rd_adc = 32'b0;
         case (idx)
@@ -334,7 +412,7 @@ module rec_mmio (
         endcase
     end
 
-    /* 三块互不重叠，直接或起来即可（没命中的那块输出 0） */
-    assign rdata = rd_h | rd_a | rd_probe | rd_adc;
+    /* 四块互不重叠，直接或起来即可（没命中的那块输出 0） */
+    assign rdata = rd_h | rd_a | rd_probe | rd_adc | rd_sweep;
 
 endmodule

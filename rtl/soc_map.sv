@@ -156,6 +156,17 @@
 `define SOC_MMIO_IDX_MEAS_MEAN   6'd49   // 0xC4 RO  窗内均值（sum>>10）
 `define SOC_MMIO_IDX_MEAS_CNT    6'd50   // 0xC8 RO  已完成窗口数
 `define SOC_MMIO_IDX_TEXT_PUT    6'd51   // 0xCC WO  {line[0], col[4:0], ch[4:0]} 写一个字符单元（S6 文本层）
+/* S2b：DAC↔ADC 传输曲线扫描器（board/adc_sweep.sv）
+ * 为什么加在 MMIO 而不是只做成 JTAG 探针：产品最终要由 ARM/CPU 自己跑这条曲线
+ * （S5 之后的自检流程），JTAG 探针只用于"没有 CPU 程序时"的现场取证。 */
+`define SOC_MMIO_IDX_SWEEP_CTL    6'd52   // 0xD0 WO  bit0 start bit1 abort（电平，内部取上升沿）
+`define SOC_MMIO_IDX_SWEEP_ST     6'd53   // 0xD4 RO  [10]=busy [9]=done [8:0]=已完成条目数
+`define SOC_MMIO_IDX_SWEEP_DATA   6'd54   // 0xD8 RO  {8'b0, ptr[7:0], avg[15:0]}
+`define SOC_MMIO_IDX_SWEEP_PTR    6'd55   // 0xDC RW  扫描表读指针
+`define SOC_MMIO_IDX_SWEEP_SETTLE 6'd56   // 0xE0 RW  稳定时间，单位 10 µs（默认 100 = 1 ms）
+`define SOC_MMIO_IDX_SWEEP_AVG    6'd57   // 0xE4 RW  [3:0]=log2(平均次数)，默认 4 → 16 次
+`define SOC_MMIO_IDX_ADC_PAIR     6'd58   // 0xE8 RO  {8'b0, dac_byte[7:0], adc_last[15:0]} 同一时刻
+`define SOC_MMIO_IDX_SWEEP_CUR    6'd59   // 0xEC RO  当前正在测的码
 
 /* --------------------- PLIC-lite 中断源编号（与 board_top 一致）----------- */
 `define SOC_IRQ_UART_RX    0     // RX FIFO 非空（电平）

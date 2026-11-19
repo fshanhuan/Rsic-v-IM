@@ -217,7 +217,14 @@ module board_top_ps_rec #(
         // 触发/测量：不做
         .trig_th (), .trig_mode (), .trig_en (), .trig_clear (),
         .trig_fired (1'b0), .trig_above (1'b0), .trig_cnt (32'h0),
-        .meas_min (16'h0), .meas_max (16'h0), .meas_mean (16'h0), .meas_cnt (32'h0)
+        .meas_min (16'h0), .meas_max (16'h0), .meas_mean (16'h0), .meas_cnt (32'h0),
+
+        // S2b 扫描器：PS 版不接（没有 DAC 自环），输入全钉 0，输出悬空
+        .sweep_start (), .sweep_abort (),
+        .sweep_ptr (), .sweep_settle (), .sweep_avg (),
+        .sweep_busy (1'b0), .sweep_done (1'b0), .sweep_ndone (9'd0),
+        .sweep_cur_code (8'd0), .sweep_rd_avg (16'd0), .sweep_rd_ok (1'b0),
+        .dac_byte_eff (8'hFF)
     );
 
     xadc_sampler #(
