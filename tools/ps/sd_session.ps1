@@ -15,14 +15,15 @@
 #   powershell -NoProfile -File tools\ps\sd_session.ps1                 # Card mode
 #   powershell -NoProfile -File tools\ps\sd_session.ps1 -Mode Plan
 #   powershell -NoProfile -File tools\ps\sd_session.ps1 -Mode Sim
-#   powershell -NoProfile -File tools\ps\sd_session.ps1 -Mode Full
+#   powershell -NoProfile -File tools\ps\sd_session.ps1 -Mode Full [-PlBit <bit>]
 #
 # PREREQUISITES (the script cannot do these):
 #   1) micro SD card inserted
 #   2) board POWER-CYCLED after inserting (unplug DC 5 s), so the card sees a real
 #      power-on reset. A PS soft reset is NOT enough.
-#   3) PL bitstream with the recorder MMIO (only needed for -Mode Full):
-#        xsdb _diag\restore_s6.tcl   or  board_top_ps_rec_S5.bit
+#   3) -Mode Full needs a PL with the recorder MMIO. The PL is EMPTY after a power
+#      cycle, so Full mode programs -PlBit itself (default: the real-XADC
+#      board_top_ps_rec_S5x.bit). -Mode Card does not need the PL at all.
 #
 # NOTE: pure ASCII only (PowerShell 5.1 decodes BOM-less .ps1 as OEM 936).
 param(
@@ -32,7 +33,8 @@ param(
     [string] $Root   = '',
     [string] $Python = 'python',
     [int]    $Wait   = 12000,
-    [int]    $Samples = 1024
+    [int]    $Samples = 1024,
+    [string] $PlBit  = 'E:\FPGA\v9_vivado_ila\_baseline_v9\board_top_ps_rec_S5x.bit'
 )
 
 $ErrorActionPreference = 'Continue'
@@ -231,6 +233,28 @@ if (-not $good) {
 
 # ------------------------------------------------------------------ optional: real samples
 if ($Mode -eq 'Full') {
+    # The PL is EMPTY after a power cycle (that is how the card gets a real power-on
+    # reset), so Full mode has to put the recorder bitstream back itself. Doing it
+    # here keeps the one-shot session to a single command.
+    Say "== [full] program PL (recorder + real XADC): $PlBit"
+    if (-not (Test-Path -LiteralPath $PlBit)) {
+        Add-Result 'pl' 'FAIL' "bitfile not found: $PlBit"
+        $results | Format-Table -AutoSize | Out-String | Write-Host
+        exit 1
+    }
+    Get-Process hw_server, cs_server -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }
+    Start-Sleep -Seconds 2
+    $env:PL_BIT = $PlBit
+    $pg = & $Xsdb 'tools\ps\prog_pl.tcl' 2>&1 | Out-String
+    ($pg -split "`n") | Where-Object { $_ -match '^\[PG\]' } | ForEach-Object { Say "   $($_.TrimEnd())" }
+    if ($pg -match 'prog: 0') {
+        Add-Result 'pl' 'PASS' ("programmed " + (Split-Path -Leaf $PlBit))
+    } else {
+        Add-Result 'pl' 'FAIL' 'fpga -file failed (see [PG] lines above)'
+        $results | Format-Table -AutoSize | Out-String | Write-Host
+        exit 1
+    }
+
     Say "== [full] sd_fat_sd: real recorder samples (needs the recorder bitstream) =="
     $log = Run-App 'sd_fat_sd' 60000 'session_write_real'
     $m = [regex]::Match($log, 'captured (\d+) samples')
