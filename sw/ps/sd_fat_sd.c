@@ -22,6 +22,7 @@
 #include "sd_bit.h"
 #include "sd_wr.h"
 #include "sd_record.h"
+#include "rec_capture.h"
 #include "fat32.h"
 #include "xil_printf.h"
 #include "xil_io.h"
@@ -43,45 +44,19 @@
 static u16 samp[NSAMP_MAX] __attribute__((aligned(4)));
 static u8  blk[512] __attribute__((aligned(4)));
 
-/* 弹出最多 max 个样本；返回实际拿到的个数。adc_cnt 前后差值写进 out 指针。
- *
- * ★★ 2026-11-20 00:30 修两个真 bug（没有卡也能测出来：抓满 buffer 后直接 JTAG dump）：
- *   1) **idx35(0x8C) 读只是"窥视"队头，不会弹出** —— 弹出必须写 idx38(0x98) 的 bit2。
- *      原来的代码只读不弹，于是 1024 个样本全是**同一个队头值**（实测全 3706）。
- *      正确序列：peek -> pop -> DSB（等写落地）-> 下一个 peek。
- *      依据：tools/ps/arm_drain.tcl 头注释（"idx35 读 = FIFO 队头（只窥视）"）+
- *      board/rec_mmio.sv 的 `adc_rd_en_r <= wdata[2]`。
- *   2) **XADC 结果是左对齐的 16 位**，12 位码在 [15:4]。原代码 `& 0x0FFF` 取的是
- *      **低 12 位**（实测拿到 3706 = 0xE7A，正好是 0x9E7A 的低位），应该 `>> 4`。
- *      （假 DRP 时代这条路径从没跑过 —— 只有 sd_fat_sd_syn 跑过，它不走 capture()。）
- */
+/* 取样本的实现搬到 sw/ps/rec_capture.h 了 —— 因为那段逻辑有两个真 bug（见那里的说明），
+ * 而它在板子上**只有插了卡才会跑到**。抽出来以后 PC 上也能跑同一份代码：
+ *   tools/ps/host/rec_capture_test.c 会用假的 rec_mmio 模型调它。
+ * 这里只做"接到真实 MMIO"的适配。 */
+static unsigned int f_rd(unsigned int a)             { return Xil_In32(a); }
+static void         f_wr(unsigned int a, unsigned int v) { Xil_Out32(a, v); }
+static void         f_bar(void)                      { __asm__ volatile ("dsb sy" ::: "memory"); }
+
+static const rec_io_ops rec_ops_real = { f_rd, f_wr, f_bar };
+
 static u32 capture(u32 max, u32 *cnt_before, u32 *cnt_after)
 {
-    u32 n = 0U;
-    u32 guard;
-
-    *cnt_before = Xil_In32(REC_CNT);
-    Xil_Out32(REC_CTL, 0x1U);              /* en = 1，启动轮询 */
-
-    while (n < max) {
-        guard = 0U;
-        while (((Xil_In32(REC_ST) & 0x4U) == 0U) && (guard < 200000U)) {
-            guard++;
-        }
-        if (guard >= 200000U) {
-            break;                          /* FIFO 空了：正常结束 */
-        }
-        /* 左对齐 16 位 -> 12 位码 */
-        samp[n] = (u16)((Xil_In32(REC_DATA) >> 4) & 0x0FFFU);
-        /* 弹出：写 bit2；bit0 在 bit2=1 时被忽略（见 rec_mmio），所以 en 不受影响 */
-        Xil_Out32(REC_CTL, 0x5U);
-        /* 写是 posted 的：不等它落地就 peek 会又读到同一个队头 */
-        __asm__ volatile ("dsb sy" ::: "memory");
-        n++;
-    }
-
-    *cnt_after = Xil_In32(REC_CNT);
-    return n;
+    return rec_capture(&rec_ops_real, REC_MMIO, samp, max, cnt_before, cnt_after);
 }
 
 int main(void)

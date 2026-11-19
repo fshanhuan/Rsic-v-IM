@@ -60,8 +60,21 @@ Write-Host "[host] evidence-dump pipeline (same format the board dumps)"
 & $Python 'tools\ps\fat32_verify_dump.py' 'sim\build\sd\host_dump.bin' --samples 1000
 $rc4 = $LASTEXITCODE
 
-if (($rc1 -ne 0) -or ($rc2 -ne 0) -or ($rc2b -ne 0) -or ($rc3 -ne 0) -or ($rc4 -ne 0)) {
+# 2026-11-20: 取样本那段的单元测试。这段逻辑（rec_capture.h）在板上**只有插了卡
+# 才会跑到**，两个真 bug 因此活了几个月。这里用假的 rec_mmio 模型跑同一份代码：
+# 窥视不弹 / 只读不弹 / 码值取错位 都会立刻红。
+Write-Host "[host] rec_capture (peek/pop/shift protocol)"
+& gcc -O2 -I sw/ps -o sim\build\rec_capture_test.exe tools\ps\host\rec_capture_test.c
+if ($LASTEXITCODE -eq 0) {
+    & 'sim\build\rec_capture_test.exe'
+    $rc5 = $LASTEXITCODE
+} else {
+    Write-Host "[host] rec_capture_test did not compile"
+    $rc5 = 1
+}
+
+if (($rc1 -ne 0) -or ($rc2 -ne 0) -or ($rc2b -ne 0) -or ($rc3 -ne 0) -or ($rc4 -ne 0) -or ($rc5 -ne 0)) {
     Write-Host "[host] RESULT FAIL_verify"; exit 1
 }
-Write-Host "[host] RESULT PASS (C test + spec parse + third-party driver + dump pipeline)"
+Write-Host "[host] RESULT PASS (C test + spec parse + third-party driver + dump pipeline + rec_capture)"
 exit 0
