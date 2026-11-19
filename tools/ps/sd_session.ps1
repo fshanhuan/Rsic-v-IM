@@ -57,7 +57,7 @@ $plan = @(
     'sd_bit   : identify card, read LBA0 (proves the wire protocol works)',
     'write    : sd_fat_sd_syn -> format + 1024-sample CSV (synthetic samples)',
     'dump     : sd_dump reads the evidence sectors into OCM, JTAG dumps them',
-    'verify   : fat32_verify_dump.py rebuilds the volume and compares bytes',
+    'verify   : fat32_verify_dump.py rebuilds the volume, compares bytes, extracts the CSV to the PC',
     'full     : (optional) sd_fat_sd uses the real recorder FIFO, then re-dump/verify'
 )
 
@@ -184,18 +184,39 @@ function Dump-And-Verify($nsamp, $tag) {
     if (-not (Test-Path 'sim\build\sd\sd_dump.bin')) { Add-Result "dump-$tag" 'FAIL' 'no dump file'; return $false }
 
     Say "== [verify] rebuild the volume from those sectors and compare =="
-    $v = & $Python 'tools\ps\fat32_verify_dump.py' 'sim\build\sd\sd_dump.bin' --samples $nsamp 2>&1 | Out-String
+    # --extract: 把"卡上那个文件"原样落到 PC 上（验收要求里的"PC 能打开"）。
+    # 落盘的是从卡字节重建出来的内容，不是期望值，所以这个文件就是卡上的东西。
+    $csvOut = "sim\build\sd\card_file_$tag.csv"
+    $v = & $Python 'tools\ps\fat32_verify_dump.py' 'sim\build\sd\sd_dump.bin' --samples $nsamp --extract $csvOut 2>&1 | Out-String
     Set-Content -Path "sim\build\sd\session_verify_$tag.txt" -Value $v -Encoding UTF8
-    $v -split "`n" | Where-Object { $_ -match 'BPB:|clusters=|dirent:|chain:|expected|got |RESULT' } |
+    $v -split "`n" | Where-Object { $_ -match 'BPB:|clusters=|dirent:|chain:|expected|got |extracted|csv open|RESULT' } |
         ForEach-Object { Say "  $($_.TrimEnd())" }
-    $ok = ($v -match 'RESULT PASS')
+    $ok = ($v -match 'RESULT PASS') -and ($v -match 'RESULT_CSV PASS')
+
+    # 独立打开第二次：用 PowerShell 的 Import-Csv（和 Python csv 模块完全不同的实现）
+    if (Test-Path -LiteralPath $csvOut) {
+        try {
+            $rows = Import-Csv -LiteralPath $csvOut
+            Say ("  [pc-open] Import-Csv: {0} rows, columns={1}" -f $rows.Count,
+                 (($rows[0].PSObject.Properties.Name) -join ','))
+            Say ("  [pc-open] first={0} last={1}  (file: {2})" -f
+                 ($rows[0].idx + ':' + $rows[0].adc), ($rows[-1].idx + ':' + $rows[-1].adc), $csvOut)
+            if ($rows.Count -lt 2) { $ok = $false }
+        } catch {
+            Say "  [pc-open] FAIL: $($_.Exception.Message)"
+            $ok = $false
+        }
+    } else {
+        Say "  [pc-open] FAIL: $csvOut was not produced"
+        $ok = $false
+    }
 
     Say "== [verify] third-party FAT driver on the same volume =="
     $p = & $Python 'tools\ps\fat32_probe_pyfatfs.py' 'sim\build\sd\from_dump.img' --samples $nsamp 2>&1 | Out-String
     $p -split "`n" | Where-Object { $_ -match 'root listing|read:|exp :|RESULT' } |
         ForEach-Object { Say "  $($_.TrimEnd())" }
     if ($ok -and ($p -match 'RESULT PASS')) {
-        Add-Result "verify-$tag" 'PASS' 'card bytes match the CSV and a third-party FAT driver reads them'
+        Add-Result "verify-$tag" 'PASS' "card bytes == CSV (djb2 match), CSV extracted to PC and opened twice, third-party FAT driver reads it"
         return $true
     }
     Add-Result "verify-$tag" 'FAIL' ("see sim\build\sd\session_verify_$tag.txt")

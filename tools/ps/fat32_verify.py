@@ -46,7 +46,7 @@ def expected_csv(n=100):
     return bytes(out)
 
 
-def main(path, want_size=None, nsamp=100):
+def main(path, want_size=None, nsamp=100, extract_to=None):
     img = open(path, "rb").read()
     print("image: %s  (%d bytes, %.2f MB, %d sectors)" %
           (path, len(img), len(img) / (1024.0 * 1024.0), len(img) // SEC))
@@ -168,6 +168,34 @@ def main(path, want_size=None, nsamp=100):
                 break
 
     print("RESULT %s" % ("PASS" if ok else "FAIL"))
+
+    # ---- 把"卡上那个文件"原样落到 PC 上 --------------------------------
+    # 验收要求里有"PC 能打开"这一条。光在内存里比字节证明不了它 ——
+    # 得真的生成一个文件，再用一个独立的读法（csv 模块）把它打开一遍。
+    # extract_to 就是干这个的；提取的是**从卡字节里重建出来的 got**，
+    # 不是期望值，所以落到盘上的确实是卡上的内容。
+    if extract_to:
+        import os
+        d = os.path.dirname(os.path.abspath(extract_to))
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(extract_to, "wb") as f:
+            f.write(got)
+        print("extracted: %s (%d bytes, djb2=0x%08X)" % (extract_to, len(got), djb2(got)))
+        # 用标准 csv 读一遍 —— 这才是"PC 能打开"的证据，而不是我们自己的解析器
+        try:
+            import csv
+            with open(extract_to, "r", newline="") as f:
+                rows = list(csv.reader(f))
+            hdr = rows[0] if rows else []
+            print("csv open check: %d rows (incl. header), header=%s" % (len(rows), hdr))
+            ok_csv = (len(rows) == nsamp + 1 and hdr == ["idx", "adc"])
+        except Exception as e:                      # noqa: BLE001
+            print("csv open check: EXCEPTION %s" % e)
+            ok_csv = False
+        print("RESULT_CSV %s" % ("PASS" if ok_csv else "FAIL"))
+        ok = ok and ok_csv
+
     return 0 if ok else 1
 
 
@@ -175,6 +203,7 @@ if __name__ == "__main__":
     p = "sim/build/sd/ramdisk.bin"
     size = None
     nsamp = 100
+    ext = None
     a = sys.argv[1:]
     i = 0
     while i < len(a):
@@ -182,6 +211,8 @@ if __name__ == "__main__":
             size = int(a[i + 1]); i += 2
         elif a[i] == "--samples" and i + 1 < len(a):
             nsamp = int(a[i + 1]); i += 2
+        elif a[i] == "--extract" and i + 1 < len(a):
+            ext = a[i + 1]; i += 2
         else:
             p = a[i]; i += 1
-    sys.exit(main(p, size, nsamp))
+    sys.exit(main(p, size, nsamp, ext))

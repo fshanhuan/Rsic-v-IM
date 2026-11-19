@@ -79,11 +79,14 @@ def build_image(dump_path, tmp_path):
 if __name__ == "__main__":
     p = sys.argv[1] if len(sys.argv) > 1 else "sim/build/sd/host_dump.bin"
     nsamp = 100
+    ext = None
     a = sys.argv[2:]
     i = 0
     while i < len(a):
         if a[i] == "--samples" and i + 1 < len(a):
             nsamp = int(a[i + 1]); i += 2
+        elif a[i] == "--extract" and i + 1 < len(a):
+            ext = a[i + 1]; i += 2
         else:
             i += 1
     tmp = os.path.join("sim", "build", "sd", "from_dump.img")
@@ -91,4 +94,4 @@ if __name__ == "__main__":
     q = build_image(p, tmp)
     if q is None:
         sys.exit(1)
-    sys.exit(V.main(q, None, nsamp))
+    sys.exit(V.main(q, None, nsamp, ext))

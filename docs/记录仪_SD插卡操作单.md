@@ -39,11 +39,26 @@ powershell -NoProfile -File tools\ps\sd_session.ps1
 [PASS] preflight : debug APB reachable
 [PASS] sd_bit : card identified, LBA0 read
 [PASS] write  : CSV written and read back byte-identical (diff=0)
-[PASS] verify-1024 : card bytes match the CSV and a third-party FAT driver reads them
+[PASS] verify-1024 : card bytes == CSV (djb2 match), CSV extracted to PC and opened twice, third-party FAT driver reads it
 RESULT PASS (card validated end to end)
 ```
 
 `diff=0` 和最后一行 `RESULT PASS` 就是"卡上文件和导出逐字节一致"的凭据。
+
+**"PC 能打开"是单独一条证据**（2026-11-19 补）：`verify` 这一步会把卡字节里
+重建出来的文件**落到 PC 上** `sim\build\sd\card_file_1024.csv`，然后**用两种
+互不相干的实现各打开一次** —— Python 的 `csv` 模块、PowerShell 的 `Import-Csv`，
+两次都报行数与列名。输出里会多这两行：
+
+```
+  extracted: sim\build\sd\card_file_1024.csv (9603 bytes, djb2=0x545706DB)
+  csv open check: 1001 rows (incl. header), header=['idx', 'adc']
+  [pc-open] Import-Csv: 1000 rows, columns=idx,adc
+```
+
+验收时直接双击那个 `.csv`（Excel / 记事本都能开）就是最直白的物证。
+本机已用主机侧 dump 把这条路跑通：`9603` 字节、`djb2=0x545706DB`、
+**1000 行 0 处不符**（按 `idx*7+0x800 & 0xFFF` 复核）。
 
 > 2026-11-19 21:30 补：preflight 那一行也可能长这样 ——
 > `[PASS] preflight : debug APB recovered by rst -processor`
