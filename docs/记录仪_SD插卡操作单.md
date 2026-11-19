@@ -35,6 +35,28 @@ powershell -NoProfile -File tools\ps\sd_session.ps1
 
 ## 三、正常应该看到什么
 
+> **⚠️ 2026-11-19 22:20 重要澄清：`-Mode Full` 写进去的样本是"假 DRP"的方波，不是真 XADC。**
+>
+> PS 那一版位流（`board_top_ps_rec_S5.bit`）为了不占模拟引脚、不要 DMA，
+> **ADC 用的是假 DRP**（`board/board_top_ps_rec.sv` 第 18 行写明"不接 XADC 原语"），
+> 码值固定 `2048 ± 32`（`0x07E0 / 0x0820`）。刚才重跑实测确认：
+> `drain_20261119_221551.csv` 1024 行只有这两个值，`2016 ×512 + 2080 ×512`。
+>
+> 真正带**真 XADC** 的是 PL 那版（`board_top_rec.sv`，S2b2 位流），但它把 PS 的
+> AXI 从口**钉死**了（`s_axil_*` 全接常数），ARM 读不到。
+> 所以现在**没有任何一个位流同时具备"真 XADC + PS 可读 AXI"**。
+>
+> 这件事不影响"SD 写卡链路"的结论（写/读/校验都是真的），但它决定了
+> `-Mode Full` 到底证明了什么。要写进 SD 的样本是**真 ADC 数据**，有两条路：
+
+| 方案 | 改什么 | 代价 | 样本 |
+|---|---|---|---|
+| **A（小）** | 把 `board_top_ps_rec.sv` 里的假 DRP 换成真的 XADC 原语，只开**片内温度通道**（不占任何引脚，端口不变 → 不用重包 IP）| 一次 BD 重建（~40 min）| **真 ADC 转换**，但是温度 |
+| **B（大）** | 再给 PS 那版加上 AD11/AD10/AD2 的模拟 inout，同时改 IP 端口表 + BD 连线 + XDC | 重包 IP + BD 重建，1~2 轮 | **真 ADC**，且是外部模拟通道 |
+
+在选之前，先把板上这条链路跑通（`-Mode Card`）不受影响 —— 它写的是程序自己
+生成的合成 CSV，和 ADC 无关。
+
 ```
 [PASS] preflight : debug APB reachable
 [PASS] sd_bit : card identified, LBA0 read
