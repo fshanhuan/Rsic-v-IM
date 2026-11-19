@@ -143,6 +143,7 @@ module rec_mmio (
      *   另一路的"上升沿"就传不进去了。正常用法是软件那路只在启动瞬间写 1。 */
     output logic        sweep_start,
     output logic        sweep_abort,
+    output logic        sweep_play,
     output logic [ 7:0] sweep_ptr,
     output logic [15:0] sweep_settle,
     output logic [ 3:0] sweep_avg,
@@ -334,7 +335,7 @@ module rec_mmio (
      *   分压网络后面挂着 LM324，输出阻抗不小；换分压电阻（3.3k/10k）之后稳定时间
      *   要跟着变。做成寄存器就不用为每种接法重建位流 —— 重建一次 30 分钟。
      * ---------------------------------------------------------------------- */
-    logic        sweep_start_r, sweep_abort_r;
+    logic        sweep_start_r, sweep_abort_r, sweep_play_r;
     logic [ 7:0] sweep_ptr_r;
     logic [15:0] sweep_settle_r;
     logic [ 3:0] sweep_avg_r;
@@ -343,6 +344,7 @@ module rec_mmio (
         if (rst) begin
             sweep_start_r  <= 1'b0;
             sweep_abort_r  <= 1'b0;
+            sweep_play_r   <= 1'b0;
             sweep_ptr_r    <= 8'd0;
             sweep_settle_r <= 16'd100;   // 1 ms @ 10 µs 时基
             sweep_avg_r    <= 4'd4;      // 16 次平均（±3 LSB → ±0.75 LSB）
@@ -352,6 +354,7 @@ module rec_mmio (
                     6'd52: begin
                         sweep_start_r <= wdata[0];
                         sweep_abort_r <= wdata[1];
+                        sweep_play_r  <= wdata[2];
                     end
                     6'd55: sweep_ptr_r    <= wdata[7:0];
                     6'd56: sweep_settle_r <= wdata[15:0];
@@ -364,6 +367,7 @@ module rec_mmio (
 
     assign sweep_start  = sweep_start_r;
     assign sweep_abort  = sweep_abort_r;
+    assign sweep_play   = sweep_play_r;
     assign sweep_ptr    = sweep_ptr_r;
     assign sweep_settle = sweep_settle_r;
     assign sweep_avg    = sweep_avg_r;

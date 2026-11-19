@@ -29,8 +29,9 @@
  *   平均后仍是同一格式，软件按 v = code/4096 V 换算即可。
  * ============================================================================= */
 module adc_sweep #(
-    parameter int CLK_HZ  = 50_000_000,
-    parameter int TICK_HZ = 100_000          // 时基 = 10 µs，settle 的单位
+    parameter int CLK_HZ   = 50_000_000,
+    parameter int TICK_HZ  = 100_000,          // 时基 = 10 µs，settle 的单位
+    parameter int PLAY_DIV = 12_500_000        // 播放每条的停留时钟数（250 ms @ 50 MHz）
 ) (
     input  logic        clk,
     input  logic        rst,
@@ -45,6 +46,17 @@ module adc_sweep #(
     input  logic [ 7:0] rd_ptr,
     output logic [15:0] rd_avg,
     output logic        rd_ok,           // 该条目真的被扫过了（否则读到的是未初始化值）
+
+    /* ---- 自动播放（2026-11-19 17:50 新增）----
+     * ★ 为什么还要这一套：上板实测发现"用 VIO 输出当读指针"在这块板上不可靠 ——
+     *   写下去的 ptr 在硬件里迟迟不跟随（写 100，4.1 s 内 41 次回读都没变），
+     *   读回来的表因此错位，还伪装成"高段有平台"的假曲线。
+     *   播放模式把"走地址"这件事交给硬件：自己每 PLAY_DIV 个时钟换一条，
+     *   并且 idx 与 avg **在同一拍锁存**，所以从 JTAG 抓到的一对永远是同一条。
+     *   这样 JTAG 只读不写，慢一点、晚一点都无所谓。 */
+    input  logic        play_en,
+    output logic [ 7:0] play_idx,
+    output logic [15:0] play_avg,
 
     /* ---- DAC 侧 ---- */
     output logic        busy,            // 1 = 本模块占用 DAC
@@ -211,8 +223,55 @@ module adc_sweep #(
     assign code    = code_r;
     assign wr      = wr_r;
     assign n_done  = n_done_r;
-    assign rd_avg  = mem[rd_ptr];
-    assign rd_ok   = ({1'b0, rd_ptr} < n_done_r);
+
+    /* ★ 2026-11-19 19:45：读口只留**一个**。
+     * 上一版同时有 mem[rd_ptr]（给 MMIO/VIO 的指针读）和播放快照（mem[play_ptr]），
+     * 那是**两个 256:1 × 16 位的大 mux**。加进已经接近满的布线资源后，
+     * 路由器在 Phase 5.5 跑完 5 轮全局迭代又开了第二轮，90 分钟仍有 1398 个 overlap。
+     * 而"指针读"这条路本来就不通（§49.10），所以直接把它删掉：
+     * 上层要读表，就读播放快照 —— 反正它是硬件锁存的、成对的、可靠的。 */
+    assign rd_avg  = play_avg;
+    assign rd_ok   = ({1'b0, play_idx} < n_done_r);
     assign drain   = busy_r;      // 扫描期间把 FIFO 一直腾空
+
+    /* ------------------------------ 自动播放 ------------------------------
+     * 每 PLAY_DIV 个时钟换一条，256 条一轮约 64 s（250 ms/条）。
+     * ★ 用 250 ms 而不是 1 ms：JTAG 一次 refresh 就要几十~一百毫秒，
+     *   只有每条停留远大于读取间隔，才保证**每一条都至少被看到一次**。
+     * ★ idx 与 avg 必须在同一拍锁存（都是 play_ptr 的同一拍值），
+     *   否则读出来的一对可能来自相邻两条 —— 那就又回到错位问题。
+     * -------------------------------------------------------------------- */
+    logic [23:0] play_cnt;
+    logic [ 7:0] play_ptr;
+    logic        play_q;
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            play_cnt <= 24'd0;
+            play_ptr <= 8'd0;
+            play_q   <= 1'b0;
+            play_idx <= 8'd0;
+            play_avg <= 16'd0;
+        end else begin
+            play_q <= play_en;
+            if (!play_en) begin
+                play_cnt <= 24'd0;
+                play_ptr <= 8'd0;
+            end else if (!play_q) begin
+                /* 刚打开：立刻给出第 0 条，不用等满一个周期 */
+                play_cnt <= 24'd0;
+                play_ptr <= 8'd1;
+                play_idx <= 8'd0;
+                play_avg <= mem[8'd0];
+            end else if (play_cnt == (PLAY_DIV - 1)) begin
+                play_cnt <= 24'd0;
+                play_ptr <= play_ptr + 8'd1;              // 自然回卷 255 → 0
+                play_idx <= play_ptr;
+                play_avg <= mem[play_ptr];
+            end else begin
+                play_cnt <= play_cnt + 24'd1;
+            end
+        end
+    end
 
 endmodule

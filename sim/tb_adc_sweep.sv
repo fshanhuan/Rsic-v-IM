@@ -39,6 +39,9 @@ module tb_adc_sweep;
     logic [ 7:0] rd_ptr = 8'd0;
     logic [15:0] rd_avg;
     logic        rd_ok;
+    logic        play_en = 1'b0;
+    logic [ 7:0] play_idx;
+    logic [15:0] play_avg;
     logic        busy, wr, done, drain;
     logic [ 7:0] code;
     logic [ 8:0] n_done;
@@ -47,7 +50,8 @@ module tb_adc_sweep;
 
     adc_sweep #(
         .CLK_HZ  (CLK_HZ),
-        .TICK_HZ (TICK_HZ)
+        .TICK_HZ (TICK_HZ),
+        .PLAY_DIV(64)                   // 播放步长压短，便于仿真
     ) dut (
         .clk         (clk),
         .rst         (rst),
@@ -58,6 +62,9 @@ module tb_adc_sweep;
         .rd_ptr      (rd_ptr),
         .rd_avg      (rd_avg),
         .rd_ok       (rd_ok),
+        .play_en     (play_en),
+        .play_idx    (play_idx),
+        .play_avg    (play_avg),
         .busy        (busy),
         .code        (code),
         .wr          (wr),
@@ -110,26 +117,31 @@ module tb_adc_sweep;
     endtask
 
     /* 读所有 256 条并逐条比对，返回错误条数 */
-    task automatic verify_ram(input int off);
-        int bad, bad_ok;
-        int i;
-        logic [15:0] exp_v, got;
-        bad = 0;
-        bad_ok = 0;
+    /* 通过**播放快照**逐条读回并比对。
+     * ★ 2026-11-19 19:45 起，设计里只剩这一个读口（mem[rd_ptr] 那个 256:1 mux 被删掉了，
+     *   详见 board/adc_sweep.sv 里"读口只留一个"的注释）。 */
+    task automatic verify_play(input int off);
+        int bad, bad_ok, i, guard;
+        logic [7:0]  idx;
+        logic [15:0] exp_v;
+        bad = 0 ; bad_ok = 0;
+        play_en = 1'b1;
+        @(posedge clk);
+        @(posedge clk);
         for (i = 0; i < 256; i++) begin
-            rd_ptr = i[7:0];
-            #1;
-            exp_v = (i[15:0] << 4) + off;
-            got   = rd_avg;
+            idx   = play_idx;
+            exp_v = (idx << 4) + off;
             if (rd_ok !== 1'b1) bad_ok++;
-            if (got !== exp_v) begin
+            if (play_avg !== exp_v) begin
                 bad++;
                 if (bad <= 5)
-                    $display("[SWEEP]   i=%0d exp=0x%04X got=0x%04X", i, exp_v, got);
+                    $display("[SWEEP]   play idx=%0d exp=0x%04X got=0x%04X", idx, exp_v, play_avg);
             end
+            guard = 0;
+            while (play_idx == idx && guard < 200000) begin @(posedge clk); guard++; end
         end
-        rd_ptr = 8'd0;
-        #1;
+        play_en = 1'b0;
+        @(posedge clk);
         chk(bad == 0, $sformatf("256 条全对 (off=%0d)，错 %0d 条", off, bad));
         chk(bad_ok == 0, $sformatf("256 条 rd_ok 全为 1，例外 %0d 条", bad_ok));
     endtask
@@ -168,7 +180,7 @@ module tb_adc_sweep;
         chk(n_done == 9'd256, $sformatf("T1 n_done=256 (实际 %0d)", n_done));
         chk(code == 8'hFF, $sformatf("T1 结束时停在码 0xFF (实际 0x%02X)", code));
         chk(busy == 1'b0, "T1 结束后 busy=0（DAC 交还 MMIO）");
-        verify_ram(0);
+        verify_play(0);
 
         /* ---------- T2：加 16 LSB 偏置，扫完再重启 ---------- */
         offset = 16'd16;
@@ -178,7 +190,48 @@ module tb_adc_sweep;
         chk(busy == 1'b1 && done == 1'b0, "T2 重启：busy=1 且 done 被清");
         wait_done(600_000);
         chk(done == 1'b1, "T2 第二次扫描完成");
-        verify_ram(16);
+        verify_play(16);
+
+        /* ---------- T5：自动播放（把"走地址"交给硬件）----------
+         * 表里现在是 offset=16 那轮的结果：avg(i) = (i<<4)+16。
+         * 判据：idx 每 PLAY_DIV 拍前进一条、avg 与 idx **同一拍对应**、256 条后回卷到 0。
+         * ★ 必须排在 T3（abort 那轮会把开头几条改成 offset=0）之前。 */
+        play_en = 1'b0;
+        repeat (100) @(posedge clk);
+        chk(play_idx == 8'd0, "T5 play_en=0 时 idx 停在 0");
+
+        play_en = 1'b1;
+        @(posedge clk);
+        @(posedge clk);
+        chk(play_idx == 8'd0, "T5 刚打开播放先给第 0 条");
+
+        begin : play_check
+            int step, bad_avg, bad_step, prev, seen;
+            logic [7:0]  idx;
+            logic [15:0] exp_v;
+            bad_avg = 0 ; bad_step = 0 ; seen = 0 ; prev = -1;
+            for (step = 0; step < 300; step++) begin
+                logic [7:0] old;
+                old = play_idx;
+                while (play_idx == old) @(posedge clk);   /* 等它换一条 */
+                idx   = play_idx;
+                exp_v = (idx << 4) + 16;
+                if (play_avg !== exp_v) begin
+                    bad_avg++;
+                    if (bad_avg <= 3)
+                        $display("[SWEEP]   play idx=%0d exp=0x%04X got=0x%04X", idx, exp_v, play_avg);
+                end
+                if (prev >= 0 && idx !== ((prev + 1) & 8'hFF)) bad_step++;
+                prev = idx;
+                seen++;
+            end
+            chk(bad_avg == 0, $sformatf("T5 播放的 (idx,avg) 每一对都对，错 %0d 对", bad_avg));
+            chk(bad_step == 0, $sformatf("T5 播放严格逐条前进（含 255→0 回卷），跳变 %0d 次", bad_step));
+            chk(seen >= 256, $sformatf("T5 至少走完一整轮（走了 %0d 条）", seen));
+        end
+
+        play_en = 1'b0;
+        repeat (10) @(posedge clk);
 
         /* ---------- T4：start 保持高电平不应再触发 ---------- */
         start_level = 1'b1;
