@@ -37,14 +37,23 @@ powershell -NoProfile -File tools\ps\sd_session.ps1
 
 > **⚠️ 2026-11-19 22:20 重要澄清：`-Mode Full` 写进去的样本是"假 DRP"的方波，不是真 XADC。**
 >
+> **✅ 23:49 已修好：方案 A 完成。** 新位流 `_baseline_v9/board_top_ps_rec_S5x.bit` 里
+> ADC 换成了**真 XADC**（片内温度通道），实测排空 256 个样本：
+> 15 个不同码值 / 2529…2543 / 均值 2536.5 → **619.3 mV → 38.9 °C**，
+> 期间 `adc_cnt` **+256**（200 kSa/s）。
+> 用法：先 `xsdb _diag\prog_s5x.tcl` 烧这个位流，再跑 `-Mode Full`
+> （或直接 `_diag\s5x_verify.ps1`）。旧位流保留为 `board_top_ps_rec_S5_fakedrp.bit`。
+>
+> 下面是当时（修好之前）的记录，留着说明**为什么会有这一步**：
+>
 > PS 那一版位流（`board_top_ps_rec_S5.bit`）为了不占模拟引脚、不要 DMA，
 > **ADC 用的是假 DRP**（`board/board_top_ps_rec.sv` 第 18 行写明"不接 XADC 原语"），
-> 码值固定 `2048 ± 32`（`0x07E0 / 0x0820`）。刚才重跑实测确认：
+> 码值固定 `2048 ± 32`（`0x07E0 / 0x0820`）。修好前实测确认：
 > `drain_20261119_221551.csv` 1024 行只有这两个值，`2016 ×512 + 2080 ×512`。
 >
 > 真正带**真 XADC** 的是 PL 那版（`board_top_rec.sv`，S2b2 位流），但它把 PS 的
 > AXI 从口**钉死**了（`s_axil_*` 全接常数），ARM 读不到。
-> 所以现在**没有任何一个位流同时具备"真 XADC + PS 可读 AXI"**。
+> 所以修好之前**没有任何一个位流同时具备"真 XADC + PS 可读 AXI"**。
 >
 > 这件事不影响"SD 写卡链路"的结论（写/读/校验都是真的），但它决定了
 > `-Mode Full` 到底证明了什么。要写进 SD 的样本是**真 ADC 数据**，有两条路：

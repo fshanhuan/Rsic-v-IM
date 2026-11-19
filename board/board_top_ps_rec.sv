@@ -233,7 +233,20 @@ module board_top_ps_rec #(
         .FIFO_AW (10)
     ) u_adc (
         .clk (fclk), .rst (rst),
-        .en (adc_en), .ch0 (adc_ch0), .ch1 (adc_ch1), .ch1_en (adc_ch1_en),
+        /* ★★ 2026-11-19 23:20 修：**`.en` 这一根被漏掉了**。
+         * 第一版方案 A 把 `.en (adc_en)` 连同行尾的 `.ch0/.ch1` 一起替换时丢掉了它，
+         * 于是 `en` 悬空 = 0 → `tick` 永远不响 → 采样状态机卡在复位态 → 不产生 DRDY
+         * → 一个样本都没有（上板表现：`adc_cnt` 起始就是 0，排空程序读回 DEADBEEF）。
+         * 网络表证据：`u_xadc/DEN = <const0>`、`DADDR = 0x16`（正好是状态机的复位值）。
+         * ★ 教训：改端口连接时**必须逐项对照原列表**，漏一根输入 Vivado 不报错。 */
+        .en  (adc_en),
+        /* ★ 2026-11-19 22:30「方案 A」：采样通道**强制读 0x00（片内温度）**。
+         * 为什么不用 rec_mmio 给的 ch0 默认值 0x1B(AD11)：本版顶层的端口表里
+         * **没有任何模拟脚**，加脚要重包 IP + 改 BD 连线 + XDC（那是方案 B）。
+         * 方案 A 先在"不改一个端口"的前提下，把**真 ADC 转换**接进来 ——
+         * 温度通道不依赖外部接线，读回来的 0xA1xx 是硅上真值，与原来假 DRP 的
+         * 2016/2080 一眼可分。要外部模拟通道再做方案 B。 */
+        .ch0 (7'h00), .ch1 (7'h00), .ch1_en (1'b0),
         .daddr (drp_daddr), .den (drp_den), .dwe (drp_dwe), .di (drp_di),
         .do_ (drp_do), .drdy (drp_drdy),
         .rd_en (adc_rd_en), .clr_ovf (adc_clr_ovf),
@@ -242,7 +255,14 @@ module board_top_ps_rec #(
         .last_data (adc_last), .sample_stb ()
     );
 
-    /* ---- 假 DRP：3 拍后给数据，码值在 0x8000±0x200 之间方波跳（≈±32 码） ---- */
+`ifdef REC_FAKE_DRP
+    /* =====================================================================
+     * 原「假 DRP」：3 拍后给数据，码值在 0x8000±0x200 之间方波跳（≈±32 码）
+     * ---------------------------------------------------------------------
+     * ★ 保留在 `ifdef 后面：S5 那批已归档的证据（drain_*.csv 里 2016/2080 的
+     *   方波、游程 128）就是用这条路径产生的，要复现旧位流就定义 REC_FAKE_DRP。
+     *   默认**不定义** ⇒ 走真 XADC。两者在同一份源码里，改的是宏不是文件。
+     * ================================================================== */
     logic [2:0]  drp_dly;
     logic [7:0]  drp_sq;
     logic [15:0] drp_val;
@@ -271,7 +291,64 @@ module board_top_ps_rec #(
     // 方波：低 128 个样本 -512，高 128 个样本 +512（XADC 结果左对齐，故左移 4 位）
     assign drp_val = drp_sq[7] ? (16'h8000 + 16'h0200) : (16'h8000 - 16'h0200);
 
-    // 未使用的 DRP 边带
-    wire _unused_drp = &{1'b0, drp_daddr, drp_dwe, drp_di};
+`else
+    /* =====================================================================
+     * 「方案 A」真 XADC：只开**片内温度**通道，一个外部引脚都不占
+     * ---------------------------------------------------------------------
+     * 寄存器分工（UG480 表 4-1/4-2，与 board_top_rec.sv 一致）：
+     *   41h SEQ[15:12]=0010 连续序列；42h = DCLK/4（fclk=50MHz → 12.5MHz，上限 26MHz）
+     *   48h bit8 = 片内温度；49h = 0（不使能任何 VAUX）
+     * VAUXP/VAUXN 全接 0：本版没有模拟脚，接 0 不会引入浮空。
+     * ================================================================== */
+    XADC #(
+        .INIT_40 (16'h0000),
+        .INIT_41 (16'h2EF0),
+        .INIT_42 (16'h0400),
+        .INIT_48 (16'h0100),
+        .INIT_49 (16'h0000),
+        .INIT_4A (16'h0000),
+        .INIT_4B (16'h0000),
+        .INIT_4C (16'h0000),
+        .INIT_4D (16'h0000),
+        .INIT_4E (16'h0000),
+        .INIT_4F (16'h0000),
+        .INIT_50 (16'hB5ED),
+        .INIT_51 (16'h5999),
+        .INIT_52 (16'hA147),
+        .INIT_53 (16'hDD63),
+        .INIT_54 (16'hA93A),
+        .INIT_55 (16'h5111),
+        .INIT_56 (16'h91E2),
+        .INIT_57 (16'h0000),
+        .SIM_DEVICE ("7SERIES"),
+        .SIM_MONITOR_FILE ("design.txt")
+    ) u_xadc (
+        .CONVST      (1'b0),
+        .CONVSTCLK   (1'b0),
+        .DADDR       (drp_daddr),
+        .DCLK        (fclk),
+        .DEN         (drp_den),
+        .DI          (drp_di),
+        .DWE         (drp_dwe),
+        .RESET       (rst),
+        .VAUXN       (16'b0),
+        .VAUXP       (16'b0),
+        .ALM         (),
+        .BUSY        (),
+        .CHANNEL     (),
+        .DO          (drp_do),
+        .DRDY        (drp_drdy),
+        .EOC         (),
+        .EOS         (),
+        .JTAGBUSY    (),
+        .JTAGLOCKED  (),
+        .JTAGMODIFIED(),
+        .MUXADDR     (),
+        .OT          ()
+    );
+`endif
+
+    // 未使用的边带：rec_mmio 的通道选择在本版不生效（见上面的强制 0x00）
+    wire _unused_drp = &{1'b0, drp_daddr, drp_dwe, drp_di, adc_ch0, adc_ch1, adc_ch1_en};
 
 endmodule

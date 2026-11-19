@@ -4856,3 +4856,153 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\ps\hdmi_grab.ps1 -Tag 
 > 而且仪器换了以后判据要重写：显示器只能给"亮/不亮"，采集卡能给
 > **像素统计和网格周期** —— 后者能把"黑屏"、"没信号"、"有图但不是我们的图"
 > 三件事分开，前者做不到。
+
+---
+
+## 53. S5 补真 ADC：方案 A 的第一版位流是**错**的（IP 仓库同名遮蔽）
+
+### 53.1 起因
+
+§S5 那版 PS 位流用的是**假 DRP**（方波 2016/2080）。要让写进 SD 卡的样本是真 ADC
+转换，得把 `board_top_ps_rec.sv` 里的假 DRP 换成真 XADC 原语。选了**方案 A**：
+只开片内温度通道，**一个端口都不改**（所以不用重包 IP 的端口表）。
+
+改了 `board/board_top_ps_rec.sv`：假 DRP 退到 `` `ifdef REC_FAKE_DRP `` 后面，
+默认实例化 `XADC`（`INIT_41=0x2EF0` / `INIT_42=0x0400` / `INIT_48=0x0100` /
+`INIT_49=0x0000`，`VAUXP/VAUXN=0`），采样通道强制 `7'h00`（温度）。
+`xvlog -sv` 解析 0 error，22:22 开始重建。
+
+### 53.2 现象：综合一切正常，但编的是旧源码
+
+22:29 检查发现 BD 生成的副本是旧的：
+
+| 文件 | 大小 | 有 `u_xadc` |
+|---|---|---|
+| `board/board_top_ps_rec.sv`（改过的）| 14953 | ✅ |
+| `ip_repo_rec/src/board_top_ps_rec.sv`（本次打包）| 14953 | ✅ |
+| **`ps_bd_rec/.../ipshared/974c/src/board_top_ps_rec.sv`（综合真正用的）** | **11425** | ❌ |
+
+综合日志**一个 ERROR 都没有**，`xadc_sampler` 也正常综合 —— 因为那一份源码里
+本来就有一个（假的）DRP。这种错**只有上板量数据**才会暴露，等于白烧 40 分钟。
+
+### 53.3 根因：`ip_repo` 里的同名旧 IP 把新的遮住了
+
+```
+set_property ip_repo_paths [list "$ROOT/ip_repo" $IPREP] [current_project]
+                                      ^^^^^^^^^^^^^ 排在前面
+```
+
+而 `ip_repo/v2/component.xml` 里也打包过一个**同名同版本**的
+`user:ip:board_top_ps_rec:1.0`，源码是 11 月 18 日的旧版（假 DRP）。
+Vivado 解析 VLNV 时**按仓库顺序**取第一个命中 —— 于是 BD 里
+`create_bd_cell -vlnv user:ip:board_top_ps_rec:1.0` 拿到的是 `ip_repo/v2` 的旧件。
+
+**删 `ps_bd_rec` 和 `ip_repo_rec` 都没用**（第一次就是这么试的），因为遮蔽发生在
+仓库路径这一层，不在工程缓存。
+
+修法：把本次打包的 `$IPREP` 排第一。
+
+### 53.4 加了一个断言（真正值钱的东西）
+
+```tcl
+generate_target all [get_files soc_ps_rec.bd]
+make_wrapper -files [get_files soc_ps_rec.bd] -top
+
+# BD 把 IP 源码复制到 .gen/.../ipshared/<hash>/src/，综合用的是那一份。
+# 那份是旧的，日志也一切正常 —— 所以这里按**内容**断言，不靠信任。
+set gsrc [glob -nocomplain "$PROJ/ps_axil_rec.gen/sources_1/bd/soc_ps_rec/ipshared/*/src/board_top_ps_rec.sv"]
+set fh [open [lindex $gsrc 0] r]; set body [read $fh]; close $fh
+if {[string first "u_xadc" $body] < 0} { puts "!!! 旧 IP 副本"; exit 1 }
+```
+
+效果一眼可见：修好后 hash 目录从 **`974c`** 变成 **`0182`**，
+日志打印 `IP source check: real XADC present -> .../ipshared/0182/...`。
+
+> **教训：综合日志干净 ≠ 编的是我改的那份源码。**
+> 凡是"IP 打进 BD"的流程，都要在 `generate_target` 之后**按内容检查生成副本**，
+> 而不是相信"我改了 board/ 就一定会进综合"。命名冲突（同名同版本 IP 在两个仓库里）
+> 在 Vivado 里**不报错**，只按路径顺序静默选一个。
+> 另外要注意：第一次尝试是"删工程 + 删 IP 仓库"，那**解决不了**这类遮蔽 ——
+> 排查顺序应该是"先看真正被综合的那个文件内容"，再回头找它从哪来。
+
+### 53.5 第二版仍然不对：我自己漏了一根 `.en`（23:20）
+
+第二版位流 23:10 编出来了（XADC 利用率 1/1，确实进了实现）。
+
+**上板实测：`DRAIN-FAIL`。**
+
+| 项 | 旧位流（假 DRP）| 新位流（真 XADC）|
+|---|---|---|
+| PC | `ffffa104` | `ffffa0c0`（失败出口）|
+| 标记 | `BEEF0005` | **`DEADBEEF`**（毒值没被覆盖）|
+| `adc_cnt` 起点 | `0x000005FA` | **`0x00000000`** |
+| 数据 | `2016/2080` 方波 | **全 0** |
+| 结论 | `DRAIN-PASS` | `DRAIN-FAIL` |
+
+A/B 对照（换回旧位流立刻 PASS）证明**是我这次改动引入的**，不是板子状态。
+
+#### 根因：`xadc_sampler` 的 `.en` 被漏接
+
+改端口列表时，我把原行
+`.en (adc_en), .ch0 (adc_ch0), .ch1 (adc_ch1), .ch1_en (adc_ch1_en),`
+整行换成了 `.ch0 (7'h00), .ch1 (7'h00), .ch1_en (1'b0),` —— **`.en` 一起丢了**。
+于是 `en` 悬空为 0 → `tick` 永不响 → 采样状态机卡在复位态。
+
+**Vivado 全程没报错**（漏接输入端口在 IP 流程里不触发 ERROR）。定点证据来自
+**打开 routed dcp 直接查网络**：
+
+```
+u_xadc/DEN      net = <const0>        ← 从来没发过 DRP 读
+u_xadc/DADDR    = 0x16                ← 正好是状态机的复位值 daddr<=7'h16
+u_xadc/DO/DRDY  接的是真网络
+```
+
+也就是说综合把整个采样 FSM **常量折叠**掉了：一个样本都不出，而综合、实现、
+bitgen、时序报告全部"成功"。
+
+#### 两道断言（现在都在构建脚本里）
+
+| 断言 | 时机 | 能拦住 |
+|---|---|---|
+| 生成副本里必须有 `u_xadc` | `generate_target` 之后 | IP 仓库遮蔽（§53.3）|
+| **XADC 的 `DEN` 不能是常数网络** | `open_run impl_1` 之后、`write_bitstream` 之前 | 端口漏接导致 FSM 被折叠（本节）|
+
+第二条的代价是 3 行 Tcl，拦住的是"编 40 分钟才发现一个样本都没有"。
+
+> **教训：改端口连接必须与原列表**逐项**对照。**
+> 输入端口漏接在 Verilog 里是"悬空 = 0"，不报错；在综合里会被当成常数，
+> 于是整块逻辑被折叠，而**所有日志都是绿的**。
+> 判据只能是"网表里那个引脚接的是不是真网络"，不能是"综合没报错"。
+
+### 53.6 第三版成了：PS 通路里的样本是真 ADC（23:49）
+
+`.en` 接回后重建（23:16 启动，23:47 出位流），两道断言都过：
+
+```
+IP source check: real XADC present -> .../ipshared/b5de/src/board_top_ps_rec.sv
+XADC check: cell=soc_ps_rec_i/u_soc/inst/u_xadc  DEN net=soc_ps_rec_i/u_soc/inst/drp_den
+```
+
+`DEN net` 从 `<const0>` 变成真网络 —— 这就是"采样状态机活着"的证据。
+
+**上板实测（`_diag/s5x_verify.ps1`，连跑两次）**：
+
+| 项 | 旧位流（假 DRP）| **新位流 `S5x`** |
+|---|---|---|
+| 判决 | `STILL_FAKE_DRP` | **`REAL_XADC_TEMP`** |
+| 排空样本 | 256 | 256 |
+| 标记 | `BEEF0005` | **`BEEF0005`** |
+| 期间 `adc_cnt` | +256 | **+256**（1.28 ms → 200 kSa/s）|
+| **码值** | **2 个值**：2016 / 2080 | **15 个值：2529…2543** |
+| 均值 | — | **2536.5** → **619.3 mV** → **38.9 °C** |
+| 重复性 | — | 两次均值 **2536.3 / 2536.5**（差 0.2 LSB）|
+
+对照非常干净：假 DRP 只可能吐 2016/2080 两个值，**15 个连续码值 + 38.9 °C 这个数
+只能来自真温度转换**。而且 38.9 °C 与这块板长时间跑构建的实际情况相符。
+
+> **一处判据要改**：`arm_drain.tcl` 里"游程 128"是给方波用的，真温度数据下它会
+> 打印 `RESULT=DRAIN-FAIL`。这不是数据错，是**判据过期**。
+> 现在正确的判据是三条：`BEEF0005` 命中、排空计数 = 请求数、`adc_cnt` 增量 = 请求数。
+
+**S5 的硬件前置到这一步就齐了**：真 ADC → 采样器 → FIFO → AXI → ARM → CSV 全是真数据。
+剩下唯一的缺口还是那张 micro SD 卡。
