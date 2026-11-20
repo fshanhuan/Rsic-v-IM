@@ -54,6 +54,18 @@ P [format "T0: done=%d no_dev=%d busy=%d idx=%2d reg=0x%02X val=0x%02X ack_err=%
 P [format "T0: hdmi_scl=%d hdmi_sda=%d  line_health=0x%02X  f_h=0x%04X f_a=0x%04X" \
         [rd hdmi_scl_rd] [rd hdmi_sda_rd] [rd line_health] [rd f_h] [rd f_a]]
 
+# 2026-11-20 13:0x：SW0/SW1 拨码的实际电平（probe_in42）。
+# 起因：`wire swap = sw[0]` 配 PULLTYPE PULLUP ⇒ 拨码不动读 1 ⇒ "互换 SCL/SDA 的
+# 实验"默认开着，而互换不改变空闲电平，所以所有读数都看着正常。现在 swap 恒 0，
+# 这个探针只用来回答"开关到底在哪一侧"（sw 只读，不参与任何控制）。
+if {[has sw]} {
+    set s [rd sw]
+    P [format "T0: sw=0x%02X  SW0=%s  SW1=%s  （SW0=悬空 曾是「互换」档）" $s \
+        [expr {($s & 1) ? "悬空/1" : "接地/0"}] [expr {($s & 2) ? "悬空/1" : "接地/0"}]]
+} else {
+    P "T0: (没有 sw 探针 -- 这一版位流还是旧的，swap 可能仍由拨码决定)"
+}
+
 # 2026-11-20：占空比计数（probe_in40/41, 20 位，窗口 2^20 拍 ≈ 21 ms）。
 # 这两个数把"线是高还是低"变成数字，**不受 JTAG 采样时刻影响** —— 1 位探针
 # 采到 0 可能只是刚好停在驱动低电平那一小段（§52.2 的教训）。
