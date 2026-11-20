@@ -77,6 +77,24 @@ module adv7511_init #(
     logic [ 7:0] m_tx, m_rx;
     logic        m_ack, m_done;
 
+    /* ★★ 2026-11-20 21:1x 总线恢复（§52.15 的修法）
+     * -------------------------------------------------------------------------
+     * 现象：不管冷上电多少次，ADV7511 一直不应答；但在**手工**做一次
+     *   "9 个 SCL 时钟 + STOP" 之后，`init_done` 立刻变成 1（整套 14 个寄存器
+     *   都写进去了，`ack_err` 不再增长）。两次独立复现：
+     *     · 21:05  把 SCL/SDA 强制拉低再放开（放开瞬间 = 合法 STOP）之后
+     *     · 21:1x  显式打 9 拍时钟 + STOP 之后
+     * 说明从机被"半截字节"卡住、在等 STOP —— 只有恢复时序能把它放出来。
+     *
+     * 修法：进入（以及每次重试之前）先跑一段恢复时序：
+     *   9 个 SCL 时钟（SDA 释放）→ SCL 低时拉低 SDA → SCL 高 → 释放 SDA（= STOP）
+     * 这段时间**绕过 i2c_master**，直接驱动 oe（下面 assign 相或）。
+     * ------------------------------------------------------------------------- */
+    logic m_scl_oe, m_sda_oe;       // master 的
+    logic r_scl_oe, r_sda_oe;       // 恢复时序的
+    assign scl_oe = m_scl_oe | r_scl_oe;
+    assign sda_oe = m_sda_oe | r_sda_oe;
+
     i2c_master #(
         .CLK_HZ (CLK_HZ),
         .SCL_HZ (SCL_HZ)
@@ -93,14 +111,14 @@ module adv7511_init #(
         .ack_rx     (m_ack),
         .busy       (),
         .done       (m_done),
-        .scl_oe     (scl_oe),
-        .sda_oe     (sda_oe),
+        .scl_oe     (m_scl_oe),
+        .sda_oe     (m_sda_oe),
         .sda_i      (sda_i)
     );
 
     /* ------------------------------ 步骤 ------------------------------ */
-    typedef enum logic [2:0] {
-        S_IDLE, S_START, S_ADDR, S_REG, S_VAL, S_STOP, S_NEXT, S_WAIT
+    typedef enum logic [3:0] {
+        S_IDLE, S_START, S_ADDR, S_REG, S_VAL, S_STOP, S_NEXT, S_WAIT, S_RECOVER
     } st_t;
 
     st_t         st;
@@ -110,6 +128,12 @@ module adv7511_init #(
     logic [ 7:0] nack_byte;            // 最近 NACK 的字节（调试）
     logic        abort_done;            // S_WAIT 里那句 STOP 有没有发完（§52.9）
     logic [31:0] wait_cnt;
+
+    /* 恢复时序：半周期拍数 + 相位 + 剩余时钟数 */
+    localparam int HALF_CYC = (CLK_HZ / SCL_HZ) / 2;
+    logic [15:0] rec_cnt;
+    logic [ 2:0] rec_ph;
+    logic [ 3:0] rec_clk;
 
     /* ★ 函数调用不能直接取位段（tbl(idx)[15:8] 是语法错），必须先落到一条线上；
      *   而且必须写在 idx 声明**之后**（xvlog 不允许先用后声明）。
@@ -139,6 +163,11 @@ module adv7511_init #(
             m_rw       <= 1'b0;
             m_nack     <= 1'b0;
             m_tx       <= 8'h00;
+            r_scl_oe   <= 1'b0;
+            r_sda_oe   <= 1'b0;
+            rec_cnt    <= 16'd0;
+            rec_ph     <= 3'd0;
+            rec_clk    <= 4'd9;
         end else begin
             /* 请求都是单拍 */
             m_start <= 1'b0;
@@ -157,7 +186,63 @@ module adv7511_init #(
                         ack_err  <= 16'd0;
                         wait_cnt <= 32'd0;
                         abort_done <= 1'b0;
-                        st       <= S_START;
+                        /* 先做总线恢复（§52.15），再开始写表 */
+                        rec_ph   <= 3'd0;
+                        rec_clk  <= 4'd9;
+                        rec_cnt  <= 16'd0;
+                        st       <= S_RECOVER;
+                    end
+                end
+
+                /* ================= 总线恢复：9 拍 SCL + 一个 STOP =================
+                 * 相位：
+                 *   0  SCL 低（SDA 释放）   1  SCL 高（SDA 释放）—— 重复 rec_clk 次
+                 *   2  SCL 低，同时拉低 SDA
+                 *   3  SCL 高（SDA 仍低）
+                 *   4  释放 SDA（SDA 上升 + SCL 高）= 合法 STOP
+                 *   5  收尾，进 S_START
+                 * ------------------------------------------------------------------ */
+                S_RECOVER: begin
+                    busy <= 1'b1;
+                    if (rec_cnt != 16'd0) begin
+                        rec_cnt <= rec_cnt - 16'd1;
+                    end else begin
+                        case (rec_ph)
+                            3'd0: begin
+                                r_scl_oe <= 1'b1;             // SCL 拉低
+                                r_sda_oe <= 1'b0;             // SDA 释放
+                                rec_cnt  <= HALF_CYC[15:0];
+                                rec_ph   <= 3'd1;
+                            end
+                            3'd1: begin
+                                r_scl_oe <= 1'b0;             // SCL 放开（高）
+                                rec_cnt  <= HALF_CYC[15:0];
+                                if (rec_clk == 4'd0) rec_ph <= 3'd2;
+                                else begin rec_clk <= rec_clk - 4'd1; rec_ph <= 3'd0; end
+                            end
+                            3'd2: begin
+                                r_scl_oe <= 1'b1;             // SCL 低
+                                r_sda_oe <= 1'b1;             // SDA 拉低
+                                rec_cnt  <= HALF_CYC[15:0];
+                                rec_ph   <= 3'd3;
+                            end
+                            3'd3: begin
+                                r_scl_oe <= 1'b0;             // SCL 高（SDA 还低）
+                                rec_cnt  <= HALF_CYC[15:0];
+                                rec_ph   <= 3'd4;
+                            end
+                            3'd4: begin
+                                r_sda_oe <= 1'b0;             // SDA 上升 + SCL 高 = STOP
+                                rec_cnt  <= HALF_CYC[15:0];
+                                rec_ph   <= 3'd5;
+                            end
+                            default: begin
+                                r_scl_oe <= 1'b0;
+                                r_sda_oe <= 1'b0;
+                                waiting  <= 1'b0;
+                                st       <= S_START;
+                            end
+                        endcase
                     end
                 end
 
@@ -292,7 +377,11 @@ module adv7511_init #(
                         abort_done <= 1'b0;
                         idx        <= 5'd0;
                         busy       <= 1'b1;
-                        st         <= S_START;
+                        /* 重试之前也先做一次总线恢复（从机可能又被卡住）*/
+                        rec_ph     <= 3'd0;
+                        rec_clk    <= 4'd9;
+                        rec_cnt    <= 16'd0;
+                        st         <= S_RECOVER;
                     end else begin
                         wait_cnt <= wait_cnt + 32'd1;
                     end
