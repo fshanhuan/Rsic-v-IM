@@ -55,12 +55,17 @@ P [format "T0: hdmi_scl=%d hdmi_sda=%d  line_health=0x%02X  f_h=0x%04X f_a=0x%04
         [rd hdmi_scl_rd] [rd hdmi_sda_rd] [rd line_health] [rd f_h] [rd f_a]]
 
 # 2026-11-20 13:0x：SW0/SW1 拨码的实际电平（probe_in42）。
-# 起因：`wire swap = sw[0]` 配 PULLTYPE PULLUP ⇒ 拨码不动读 1 ⇒ "互换 SCL/SDA 的
-# 实验"默认开着，而互换不改变空闲电平，所以所有读数都看着正常。现在 swap 恒 0，
-# 这个探针只用来回答"开关到底在哪一侧"（sw 只读，不参与任何控制）。
-if {[has sw]} {
-    set s [rd sw]
-    P [format "T0: sw=0x%02X  SW0=%s  SW1=%s  （SW0=悬空 曾是「互换」档）" $s \
+# 起因：怀疑 `wire swap = sw[0]` 配 PULLTYPE PULLUP ⇒ 拨码不动读 1 ⇒ "互换 SCL/SDA
+# 的实验"默认开着。现在 swap 恒 0，这个探针用来回答"开关到底在哪一侧"（只读）。
+# ★ 探针名字坑：Vivado 会把 `{6'b0, sw}` 这种拼接拆开命名，实测名字是 **sw_IBUF**
+#   （不是 sw）—— 第一次没找到它，误报成"这一版位流还是旧的"。两个名字都试。
+set swprobe ""
+foreach cand {sw sw_IBUF sw_IN sw_1} {
+    if {[has $cand]} { set swprobe $cand ; break }
+}
+if {$swprobe ne ""} {
+    set s [rd $swprobe]
+    P [format "T0: %s=0x%02X  SW0=%s  SW1=%s  （bit0=1 曾是「互换 SCL/SDA」档）" $swprobe $s \
         [expr {($s & 1) ? "悬空/1" : "接地/0"}] [expr {($s & 2) ? "悬空/1" : "接地/0"}]]
 } else {
     P "T0: (没有 sw 探针 -- 这一版位流还是旧的，swap 可能仍由拨码决定)"
