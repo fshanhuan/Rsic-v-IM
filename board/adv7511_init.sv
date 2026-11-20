@@ -92,8 +92,11 @@ module adv7511_init #(
      * ------------------------------------------------------------------------- */
     logic m_scl_oe, m_sda_oe;       // master 的
     logic r_scl_oe, r_sda_oe;       // 恢复时序的
-    assign scl_oe = m_scl_oe | r_scl_oe;
-    assign sda_oe = m_sda_oe | r_sda_oe;
+    logic rec_active;               // 1 = 恢复期间，两根线完全由恢复时序接管
+    // ★ 必须"二选一"而不是"相或"：i2c_master 在字节/STOP 结束后会一直拉着 SCL 低，
+    //   相或的话恢复时序想把 SCL 抬高会被按回去 → STOP 和 9 个时钟根本没上总线。
+    assign scl_oe = rec_active ? r_scl_oe : m_scl_oe;
+    assign sda_oe = rec_active ? r_sda_oe : m_sda_oe;
 
     i2c_master #(
         .CLK_HZ (CLK_HZ),
@@ -130,8 +133,13 @@ module adv7511_init #(
     logic [31:0] wait_cnt;
 
     /* 恢复时序：半周期拍数 + 相位 + 剩余时钟数 */
-    localparam int HALF_CYC = (CLK_HZ / SCL_HZ) / 2;
-    logic [15:0] rec_cnt;
+    localparam int HOLD_CYC  = CLK_HZ / 10;      // 100 ms：实测阈值
+    // ★ 释放之后必须给总线一段"空闲高"的时间：手工恢复之所以有效，是因为恢复完
+    //   之后主控还要等完 200 ms 的重试间隔才发 START；第一版 RTL 把 hold 设成 250 ms
+    //   （> 200 ms 重试间隔）又紧接着 START，等于总线一直被按着，片子反而没机会应答。
+    localparam int GAP_CYC   = CLK_HZ / 20;      // 50 ms 空闲（两线都释放）
+    localparam int SLOW_HALF = CLK_HZ / 500;     // 2 ms 半周期 = 250 Hz 慢时钟（实测有效）
+    logic [23:0] rec_cnt;
     logic [ 2:0] rec_ph;
     logic [ 3:0] rec_clk;
 
@@ -165,7 +173,8 @@ module adv7511_init #(
             m_tx       <= 8'h00;
             r_scl_oe   <= 1'b0;
             r_sda_oe   <= 1'b0;
-            rec_cnt    <= 16'd0;
+            rec_active <= 1'b0;
+            rec_cnt    <= 24'd0;
             rec_ph     <= 3'd0;
             rec_clk    <= 4'd9;
         end else begin
@@ -189,7 +198,8 @@ module adv7511_init #(
                         /* 先做总线恢复（§52.15），再开始写表 */
                         rec_ph   <= 3'd0;
                         rec_clk  <= 4'd9;
-                        rec_cnt  <= 16'd0;
+                        rec_cnt  <= 24'd0;
+                        rec_active <= 1'b1;
                         st       <= S_RECOVER;
                     end
                 end
@@ -203,44 +213,65 @@ module adv7511_init #(
                  *   5  收尾，进 S_START
                  * ------------------------------------------------------------------ */
                 S_RECOVER: begin
+                    /* 实测得出的两个时间尺度（§52.15）：
+                     *   · 把两根线**按住 50 ms** 以上 —— 这一步才是把 ADV7511 的
+                     *     I2C 从"半截字节"里放出来的关键；
+                     *   · STOP 之后的时钟要**慢**（2 ms 半周期），100 kHz 的快速时钟没用。
+                     */
                     busy <= 1'b1;
-                    if (rec_cnt != 16'd0) begin
-                        rec_cnt <= rec_cnt - 16'd1;
+                    if (rec_cnt != 24'd0) begin
+                        rec_cnt <= rec_cnt - 24'd1;
                     end else begin
                         case (rec_ph)
-                            3'd0: begin
-                                r_scl_oe <= 1'b1;             // SCL 拉低
-                                r_sda_oe <= 1'b0;             // SDA 释放
-                                rec_cnt  <= HALF_CYC[15:0];
+                            3'd0: begin                    // 两根都按住（hold）
+                                r_scl_oe <= 1'b1;
+                                r_sda_oe <= 1'b1;
+                                rec_cnt  <= HOLD_CYC[23:0];
                                 rec_ph   <= 3'd1;
                             end
-                            3'd1: begin
-                                r_scl_oe <= 1'b0;             // SCL 放开（高）
-                                rec_cnt  <= HALF_CYC[15:0];
-                                if (rec_clk == 4'd0) rec_ph <= 3'd2;
-                                else begin rec_clk <= rec_clk - 4'd1; rec_ph <= 3'd0; end
+                            3'd1: begin                    // 放开 SCL（高），SDA 仍低
+                                r_scl_oe <= 1'b0;
+                                rec_cnt  <= SLOW_HALF[23:0];
+                                rec_ph   <= 3'd2;
                             end
-                            3'd2: begin
-                                r_scl_oe <= 1'b1;             // SCL 低
-                                r_sda_oe <= 1'b1;             // SDA 拉低
-                                rec_cnt  <= HALF_CYC[15:0];
+                            3'd2: begin                    // 放开 SDA = STOP
+                                r_sda_oe <= 1'b0;
+                                rec_cnt  <= SLOW_HALF[23:0];
                                 rec_ph   <= 3'd3;
                             end
-                            3'd3: begin
-                                r_scl_oe <= 1'b0;             // SCL 高（SDA 还低）
-                                rec_cnt  <= HALF_CYC[15:0];
+                            3'd3: begin                    // 慢时钟：SCL 低
+                                r_scl_oe <= 1'b1;
+                                rec_cnt  <= SLOW_HALF[23:0];
                                 rec_ph   <= 3'd4;
                             end
-                            3'd4: begin
-                                r_sda_oe <= 1'b0;             // SDA 上升 + SCL 高 = STOP
-                                rec_cnt  <= HALF_CYC[15:0];
-                                rec_ph   <= 3'd5;
+                            3'd4: begin                    // 慢时钟：SCL 高
+                                r_scl_oe <= 1'b0;
+                                rec_cnt  <= SLOW_HALF[23:0];
+                                if (rec_clk == 4'd0) rec_ph <= 3'd5;
+                                else begin rec_clk <= rec_clk - 4'd1; rec_ph <= 3'd3; end
                             end
-                            default: begin
+                            3'd5: begin
+                                /* 恢复动作做完 → **不要**马上 START：
+                                 * 先把两线释放，空 50 ms 让总线回到空闲高。 */
                                 r_scl_oe <= 1'b0;
                                 r_sda_oe <= 1'b0;
-                                waiting  <= 1'b0;
-                                st       <= S_START;
+                                rec_cnt  <= GAP_CYC[23:0];
+                                rec_ph   <= 3'd6;
+                            end
+                            3'd6: begin
+                                /* 空闲够了：交还总线，开始写表 */
+                                r_scl_oe   <= 1'b0;
+                                r_sda_oe   <= 1'b0;
+                                waiting    <= 1'b0;
+                                rec_active <= 1'b0;
+                                st         <= S_START;
+                            end
+                            default: begin
+                                r_scl_oe   <= 1'b0;
+                                r_sda_oe   <= 1'b0;
+                                waiting    <= 1'b0;
+                                rec_active <= 1'b0;
+                                st         <= S_START;
                             end
                         endcase
                     end
@@ -380,7 +411,8 @@ module adv7511_init #(
                         /* 重试之前也先做一次总线恢复（从机可能又被卡住）*/
                         rec_ph     <= 3'd0;
                         rec_clk    <= 4'd9;
-                        rec_cnt    <= 16'd0;
+                        rec_cnt    <= 24'd0;
+                        rec_active <= 1'b1;
                         st         <= S_RECOVER;
                     end else begin
                         wait_cnt <= wait_cnt + 32'd1;

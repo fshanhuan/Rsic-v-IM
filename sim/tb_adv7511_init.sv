@@ -229,7 +229,7 @@ module tb_adv7511_init;
     end
 
     initial begin
-        #50_000_000;
+        #600_000_000;   // 恢复时序现在要 72 ms（50 ms 按住 + 慢时钟），超时放宽
         $display("[FAIL] 仿真超时（done=%b busy=%b ack_err=%0d nwr=%0d rise=%0d fall=%0d start=%0d）", done, busy, ack_err, nwr, n_rise, n_fall, n_start);
         $display("[SELFCHECK] status=FAIL");
         $finish;
