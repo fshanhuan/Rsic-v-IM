@@ -85,6 +85,7 @@ wr vio_pull_sda 0
 commit_hw_vio $v
 after 400
 set t1 [snap "1 只按低 SCL (+400ms)"]
+    P [format "    line_health=0x%02X（音频那对线应该没变）" [rd line_health]]
 after 200
 set t1b [snap "1b 再读一次（静默期）"]
 set scl1 [lindex $t1 0]
