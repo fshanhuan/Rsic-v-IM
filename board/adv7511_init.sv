@@ -95,8 +95,8 @@ module adv7511_init #(
     logic rec_active;               // 1 = 恢复期间，两根线完全由恢复时序接管
     // ★ 必须"二选一"而不是"相或"：i2c_master 在字节/STOP 结束后会一直拉着 SCL 低，
     //   相或的话恢复时序想把 SCL 抬高会被按回去 → STOP 和 9 个时钟根本没上总线。
-    assign scl_oe = rec_active ? r_scl_oe : m_scl_oe;
-    assign sda_oe = rec_active ? r_sda_oe : m_sda_oe;
+    assign scl_oe = m_scl_oe | r_scl_oe;   // ★ 与主控并行（手工实验就是这样）
+    assign sda_oe = m_sda_oe | r_sda_oe;
 
     i2c_master #(
         .CLK_HZ (CLK_HZ),
@@ -137,7 +137,7 @@ module adv7511_init #(
     // ★ 释放之后必须给总线一段"空闲高"的时间：手工恢复之所以有效，是因为恢复完
     //   之后主控还要等完 200 ms 的重试间隔才发 START；第一版 RTL 把 hold 设成 250 ms
     //   （> 200 ms 重试间隔）又紧接着 START，等于总线一直被按着，片子反而没机会应答。
-    localparam int GAP_CYC   = CLK_HZ / 20;      // 50 ms 空闲（两线都释放）
+    localparam int GAP_CYC   = CLK_HZ / 50;      // 20 ms：手工实验里每一步之间的间隔
     localparam int SLOW_HALF = CLK_HZ / 500;     // 2 ms 半周期 = 250 Hz 慢时钟（实测有效）
     logic [23:0] rec_cnt;
     logic [ 2:0] rec_ph;
@@ -231,12 +231,12 @@ module adv7511_init #(
                             end
                             3'd1: begin                    // 放开 SCL（高），SDA 仍低
                                 r_scl_oe <= 1'b0;
-                                rec_cnt  <= SLOW_HALF[23:0];
+                                rec_cnt  <= GAP_CYC[23:0];    // 20 ms（手工实验的间隔）
                                 rec_ph   <= 3'd2;
                             end
                             3'd2: begin                    // 放开 SDA = STOP
                                 r_sda_oe <= 1'b0;
-                                rec_cnt  <= SLOW_HALF[23:0];
+                                rec_cnt  <= GAP_CYC[23:0];    // 20 ms
                                 rec_ph   <= 3'd3;
                             end
                             3'd3: begin                    // 慢时钟：SCL 低

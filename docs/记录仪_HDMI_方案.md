@@ -5291,6 +5291,7 @@ RTL 里第一版恢复是 100 kHz、约 110 µs 的 9 拍 + STOP —— 上板�
 | v2 | 按住 50 ms → STOP → 9 个 2 ms 慢时钟 | ❌ 0 |
 | v3 | 同 v2，但按住改成 250 ms | ❌ 0 |
 | v4 | 按住 100 ms → STOP → 9 个慢时钟 → 50 ms 空闲 | ❌ 0 |
+| v5 | 恢复逻辑与主控**并行驱动**（OR），按住 100 ms → 20 ms 间隔 → STOP → 9 个 2 ms 慢时钟 | ❌ 0 |
 
 而**手工**（VIO 直接拉 `vio_pull_scl/sda`，同样 100 ms）**四次都成功**（`done=1`）。
 还把两者逐段拆开验证过：
@@ -5307,6 +5308,11 @@ RTL 里第一版恢复是 100 kHz、约 110 µs 的 9 拍 + STOP —— 上板�
 要么把 `i2c_master` 的 idle 状态改成释放 SCL（更干净）。
 
 > 这一条**没有解决**，写在这里是为了不让下一个人以为"加个恢复时序就好了"。
+>
+> **暂行的可用办法**：`tools/ps/hdmi_bus_clear.tcl`（手工恢复，4/4 成功）
+> + `tools/ps/hdmi_check.tcl` —— 也就是 S1a 的 I2C 半边可以**按需演示**：
+> 先跑 bus_clear 把 `init_done` 打到 1，再跑 hdmi_check 出 `ADV7511_CONFIGURED`。
+> 自动恢复等以后再做（需要把 `i2c_master` 空闲态改成释放 SCL，是更根本的修法）。
 #### (6) 仍未解决的：没有画面
 
 `init_done=1` 时抓帧（`hdmi_grab.ps1 -Tag busclear`）仍是 `NO_SIGNAL`：
