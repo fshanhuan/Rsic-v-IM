@@ -32,7 +32,11 @@ module adv7511_rdregs #(
     output logic [7:0] d2,           // 0x42 HPD 状态
     output logic [7:0] d3,           // 0x16 输入格式（验证写入是否生效）
     output logic       busy,
-    output logic       ok            // 4 个都读成功
+    output logic       ok,           // 4 个都读成功
+    /* ★ 对照实验：向一个**不存在的地址** 0x50 发一个字节。
+     *   它必须是 NACK（ack_bogus=0）。如果它也"ACK"，说明我们的 ACK 检测
+     *   有问题（或 SDA 被按住），那么所有"写成功"的结论都不成立。 */
+    output logic       ack_bogus
 );
 
     /* ----------------------------- i2c_master ----------------------------- */
@@ -60,7 +64,7 @@ module adv7511_rdregs #(
 
     /* ------------------------------- 状态 -------------------------------- */
     typedef enum logic [3:0] {
-        R_IDLE, R_START1, R_ADDRW, R_REG, R_START2, R_ADDRR, R_DATA, R_STOP, R_NEXT, R_DONE
+        R_IDLE, B_START, B_ADDR, B_STOP, R_START1, R_ADDRW, R_REG, R_START2, R_ADDRR, R_DATA, R_STOP, R_NEXT, R_DONE
     } st_t;
 
     st_t  st;
@@ -89,6 +93,7 @@ module adv7511_rdregs #(
             busy    <= 1'b0;
             ok      <= 1'b0;
             d0 <= 8'h00; d1 <= 8'h00; d2 <= 8'h00; d3 <= 8'h00;
+            ack_bogus <= 1'b0;
             m_start <= 1'b0; m_byte <= 1'b0; m_stop <= 1'b0;
             m_rw <= 1'b0; m_nack <= 1'b0; m_tx <= 8'h00;
         end else begin
@@ -105,8 +110,29 @@ module adv7511_rdregs #(
                         ok      <= 1'b1;
                         busy    <= 1'b1;
                         waiting <= 1'b0;
-                        st      <= R_START1;
+                        ack_bogus <= 1'b0;
+                        st      <= B_START;
                     end
+                end
+
+                /* ---- 对照：不存在的地址 0x50，必须 NACK ---- */
+                B_START: if (!waiting) begin m_start <= 1'b1; waiting <= 1'b1; end
+                         else if (m_done) begin waiting <= 1'b0; st <= B_ADDR; end
+
+                B_ADDR: begin
+                    if (!waiting) begin
+                        m_byte <= 1'b1; m_rw <= 1'b0; m_tx <= {7'h50, 1'b0};
+                        waiting <= 1'b1;
+                    end else if (m_done) begin
+                        waiting   <= 1'b0;
+                        ack_bogus <= m_ack;      // 期望 0
+                        st        <= B_STOP;
+                    end
+                end
+
+                B_STOP: begin
+                    if (!waiting) begin m_stop <= 1'b1; waiting <= 1'b1; end
+                    else if (m_done) begin waiting <= 1'b0; st <= R_START1; end
                 end
 
                 R_START1: if (!waiting) begin m_start <= 1'b1; waiting <= 1'b1; end
