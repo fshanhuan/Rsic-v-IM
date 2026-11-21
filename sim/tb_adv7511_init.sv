@@ -150,20 +150,26 @@ module tb_adv7511_init;
     /* 与 DUT 表一致的期望序列 */
     function automatic logic [15:0] exp_tbl(input int i);
         case (i)
-            0: exp_tbl = 16'h9803;
-            1: exp_tbl = 16'h9AE0;
-            2: exp_tbl = 16'h9C30;
-            3: exp_tbl = 16'h9D61;
-            4: exp_tbl = 16'hA2A4;
-            5: exp_tbl = 16'hA3A4;
-            6: exp_tbl = 16'hAF04;
-            7: exp_tbl = 16'h1501;
-            8: exp_tbl = 16'h1630;
-            9: exp_tbl = 16'h1700;
-            10: exp_tbl = 16'h1846;
-            11: exp_tbl = 16'h3B00;
-            12: exp_tbl = 16'h4C00;
-            13: exp_tbl = 16'h4110;
+            0: exp_tbl = 16'h4100;
+            1: exp_tbl = 16'h9803;
+            2: exp_tbl = 16'h9AE0;
+            3: exp_tbl = 16'h9C30;
+            4: exp_tbl = 16'h9D61;
+            5: exp_tbl = 16'hA2A4;
+            6: exp_tbl = 16'hA3A4;
+            7: exp_tbl = 16'hE0D0;
+            8: exp_tbl = 16'hF900;
+            9: exp_tbl = 16'hD6C0;
+            10: exp_tbl = 16'h1501;
+            11: exp_tbl = 16'h1634;
+            12: exp_tbl = 16'h1700;
+            13: exp_tbl = 16'h1880;
+            14: exp_tbl = 16'hAF02;
+            15: exp_tbl = 16'h4080;
+            16: exp_tbl = 16'h4C04;
+            17: exp_tbl = 16'h3B00;
+            18: exp_tbl = 16'hBA60;
+            19: exp_tbl = 16'h4100;
             default: exp_tbl = 16'h0000;
         endcase
     endfunction
@@ -214,10 +220,10 @@ module tb_adv7511_init;
             for (int i = 0; i < nwr && i < 20; i++)
                 $display("  [%0d] reg=%02h val=%02h", i, writes[i][15:8], writes[i][7:0]);
 
-            chk("写入次数", nwr, 14);
-            for (int i = 0; i < 14; i++)
+            chk("写入次数", nwr, 20);
+            for (int i = 0; i < 20; i++)
                 if (i < nwr) chk($sformatf("第%0d项", i), writes[i], exp_tbl(i));
-            chk("最后一项是 0x41=0x10", writes[13], 16'h4110);
+            chk("最后一项是 0x41=0x00", writes[19], 16'h4100);
             chk("done",   done,   1);
             chk("busy",   busy,   0);
             chk("no_dev", no_dev, 0);

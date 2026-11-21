@@ -46,26 +46,46 @@ module adv7511_init #(
     output logic [15:0] ack_err    // 累计 NACK 次数
 );
 
-    /* ------------------------------ 表 ------------------------------ */
-    localparam int NTBL = 14;
+    /* ------------------------------ 表 ------------------------------
+     * ★★ 2026-11-21 22:0x 重写：原来的 14 项里 0x16=0x30 与 0x15=0x01 **自相矛盾**
+     *   （0x15 说输入是 YCbCr 4:2:2，0x16[1:0]=00 却说是 RGB 4:4:4），而且缺了
+     *   几项上 HDMI 输出必需的配置。新表逐条对照 Linux 主线驱动
+     *   drivers/media/i2c/adv7511-v4l2.c（adv7511_setup / adv7511_set_fmt）：
+     *
+     *   0x15[7:4] = 输入格式  0x0=RGB444  0x1=YCbCr422(16 位)   ← 我们只要 0x1
+     *   0x16[7:2] = 输出/位宽 0xB8=UYVY(16 位 4:2:2) 0xBC=YUYV
+     *   0x17[2:1] = 4:2:2→4:4:4 插值（0x06 = 一阶插值 + 16:9）
+     *   0x18[7]   = CSC 使能（输入 YCbCr、输出 RGB 时必须为 1）
+     *   0xBA[6:5] = 输入时钟沿（0x60 = 上升沿采样）
+     *   0x55/0x44/0x56 = 输出 RGB444 + AVI InfoFrame（很多 sink 靠它判格式）
+     *   0xD6[7:6] = 0xC0：**禁止 HPD 变化复位寄存器**（我们板上 HPD 是接实的）
+     * ---------------------------------------------------------------------- */
+    localparam int NTBL = 20;
 
     function automatic logic [15:0] tbl(input logic [4:0] i);   // {reg, val}
         case (i)
-            5'd0:  tbl = {8'h98, 8'h03};
-            5'd1:  tbl = {8'h9A, 8'hE0};
-            5'd2:  tbl = {8'h9C, 8'h30};
-            5'd3:  tbl = {8'h9D, 8'h61};
-            5'd4:  tbl = {8'hA2, 8'hA4};
-            5'd5:  tbl = {8'hA3, 8'hA4};
-            5'd6:  tbl = {8'hAF, 8'h04};
-            /* ---- 视频格式：上板必须确认的四个 ---- */
-            5'd7:  tbl = {8'h15, 8'h01};   // 输入：YCbCr 4:2:2, 16 位, 分离同步
-            5'd8:  tbl = {8'h16, 8'h30};   // 输出：RGB 4:4:4
-            5'd9:  tbl = {8'h17, 8'h00};   // 宽高比 4:3
-            5'd10: tbl = {8'h18, 8'h46};   // CSC：YCbCr→RGB
-            5'd11: tbl = {8'h3B, 8'h00};
-            5'd12: tbl = {8'h4C, 8'h00};
-            5'd13: tbl = {8'h41, 8'h10};   // 退出掉电（放最后）
+            5'd0:  tbl = {8'h41, 8'h00};   // 0x41[6]=0 -> 退出掉电（HPD 必须为高）
+            5'd1:  tbl = {8'h98, 8'h03};   // 下面 7 个是手册 Table 14“必须写”的固定寄存器
+            5'd2:  tbl = {8'h9A, 8'hE0};   // 9A[7:5]=111
+            5'd3:  tbl = {8'h9C, 8'h30};
+            5'd4:  tbl = {8'h9D, 8'h61};   // 9D[1:0]=01
+            5'd5:  tbl = {8'hA2, 8'hA4};
+            5'd6:  tbl = {8'hA3, 8'hA4};
+            5'd7:  tbl = {8'hE0, 8'hD0};   // 原来漏了
+            5'd8:  tbl = {8'hF9, 8'h00};   // 原来漏了
+            5'd9:  tbl = {8'hD6, 8'hC0};   // 禁止 HPD 复位寄存器（Linux 驱动同样处理）
+            /* ---- 输入：YCbCr 4:2:2、16 位、style 2、分离同步 ---- */
+            5'd10: tbl = {8'h15, 8'h01};   // 0x15[3:0]=1
+            5'd11: tbl = {8'h16, 8'h34};   // [7]=0 输出4:4:4  [5:4]=11 8bit  [3:2]=01 style2
+            5'd12: tbl = {8'h17, 8'h00};   // 4:3
+            /* ---- 输出：4:4:4 + CSC + HDMI 模式 + GC ---- */
+            5'd13: tbl = {8'h18, 8'h80};   // CSC 使能，缩放 00
+            5'd14: tbl = {8'hAF, 8'h02};   // 0xAF[1]=1 -> HDMI 模式（原 0x00 是 DVI）
+            5'd15: tbl = {8'h40, 8'h80};   // 0x40[7]=1 使能 General Control
+            5'd16: tbl = {8'h4C, 8'h04};   // GC 颜色深度 24 bit/pixel
+            5'd17: tbl = {8'h3B, 8'h00};   // 不做像素重复
+            5'd18: tbl = {8'hBA, 8'h60};   // 输入时钟上升沿采样
+            5'd19: tbl = {8'h41, 8'h00};   // 最后再确认一次退出掉电
             default: tbl = 16'h0000;
         endcase
     endfunction
@@ -199,8 +219,10 @@ module adv7511_init #(
                         rec_ph   <= 3'd0;
                         rec_clk  <= 4'd9;
                         rec_cnt  <= 24'd0;
-                        rec_active <= 1'b1;
-                        st       <= S_RECOVER;
+                        rec_active <= 1'b0;
+                        /* 2026-11-21 20:5x：RTL 恢复从来没成功过，先跳过它，
+                         * 让 ILA 能抓到一次真实的地址字节（判断 ACK 真假）。 */
+                        st       <= S_START;
                     end
                 end
 
@@ -412,8 +434,8 @@ module adv7511_init #(
                         rec_ph     <= 3'd0;
                         rec_clk    <= 4'd9;
                         rec_cnt    <= 24'd0;
-                        rec_active <= 1'b1;
-                        st         <= S_RECOVER;
+                        rec_active <= 1'b0;
+                        st         <= S_START;   /* 同上：重试时也不跑恢复 */
                     end else begin
                         wait_cnt <= wait_cnt + 32'd1;
                     end
