@@ -125,6 +125,9 @@ module i2c_probe #(
             2'd0:    regsel = 8'h00;
             2'd1:    regsel = 8'hF5;
             default: regsel = 8'hF6;
+            /* 2026-11-21 试过改成 0x41/0x42 想读回 ADV7511 的 Power-Down 位，
+             * 但重扫根本找不到 0x39（f_h=0x0000），读不到东西 —— 已改回原值。
+             * 详见《方案》§52.16。 */
         endcase
     endfunction
 
