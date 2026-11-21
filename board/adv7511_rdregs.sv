@@ -44,6 +44,11 @@ module adv7511_rdregs #(
     logic [7:0] m_tx, m_rx;
     logic m_ack, m_done;
 
+    logic m_scl_oe, m_sda_oe;
+    logic c_scl_oe, c_sda_oe, clr_active;
+    assign scl_oe = clr_active ? c_scl_oe : m_scl_oe;
+    assign sda_oe = clr_active ? c_sda_oe : m_sda_oe;
+
     i2c_master #(.CLK_HZ(CLK_HZ), .SCL_HZ(SCL_HZ)) u_master (
         .clk       (clk),
         .rst       (rst),
@@ -57,15 +62,22 @@ module adv7511_rdregs #(
         .ack_rx    (m_ack),
         .busy      (),
         .done      (m_done),
-        .scl_oe    (scl_oe),
-        .sda_oe    (sda_oe),
+        .scl_oe    (m_scl_oe),
+        .sda_oe    (m_sda_oe),
         .sda_i     (sda_i)
     );
 
     /* ------------------------------- 状态 -------------------------------- */
     typedef enum logic [3:0] {
-        R_IDLE, B_START, B_ADDR, B_STOP, R_START1, R_ADDRW, R_REG, R_START2, R_ADDRR, R_DATA, R_STOP, R_NEXT, R_DONE
+        R_IDLE, C_RUN, B_START, B_ADDR, B_STOP, R_START1, R_ADDRW, R_REG, R_START2, R_ADDRR, R_DATA, R_STOP, R_NEXT, R_DONE
     } st_t;
+
+    /* 总线清零（9 个 SCL 时钟 + STOP）：把被按住的从机放出来 */
+    localparam int HALF = (CLK_HZ / SCL_HZ) / 2;
+    localparam int HOLD = CLK_HZ / 20;              // 50 ms 按住
+    logic [23:0] c_cnt;
+    logic [2:0]  c_ph;
+    logic [3:0]  c_clk;
 
     st_t  st;
     logic waiting;
@@ -94,6 +106,8 @@ module adv7511_rdregs #(
             ok      <= 1'b0;
             d0 <= 8'h00; d1 <= 8'h00; d2 <= 8'h00; d3 <= 8'h00;
             ack_bogus <= 1'b0;
+            clr_active <= 1'b0; c_scl_oe <= 1'b0; c_sda_oe <= 1'b0;
+            c_cnt <= 24'd0; c_ph <= 3'd0; c_clk <= 4'd9;
             m_start <= 1'b0; m_byte <= 1'b0; m_stop <= 1'b0;
             m_rw <= 1'b0; m_nack <= 1'b0; m_tx <= 8'h00;
         end else begin
@@ -111,8 +125,33 @@ module adv7511_rdregs #(
                         busy    <= 1'b1;
                         waiting <= 1'b0;
                         ack_bogus <= 1'b0;
-                        st      <= B_START;
+                        clr_active <= 1'b1; c_scl_oe <= 1'b0; c_sda_oe <= 1'b0;
+                        c_cnt <= 24'd0; c_ph <= 3'd0; c_clk <= 4'd9;
+                        st      <= C_RUN;
                     end
+                end
+
+                /* ================= 总线清零：按住 50ms -> STOP -> 9 个慢时钟 =================
+                 * 手工做过 5 次都有效（§52.15）。相位：
+                 *   0 两根按住 50 ms   1 放开 SCL（SDA 低）   2 放开 SDA = STOP
+                 *   3 SCL 低           4 SCL 高（重复 9 次）  5 收尾
+                 * ------------------------------------------------------------------------ */
+                C_RUN: begin
+                    if (c_cnt != 24'd0) c_cnt <= c_cnt - 24'd1;
+                    else case (c_ph)
+                        3'd0: begin c_scl_oe <= 1'b1; c_sda_oe <= 1'b1; c_cnt <= HOLD[23:0]; c_ph <= 3'd1; end
+                        3'd1: begin c_scl_oe <= 1'b0; c_cnt <= HALF[23:0];      c_ph <= 3'd2; end
+                        3'd2: begin c_sda_oe <= 1'b0; c_cnt <= HALF[23:0];      c_ph <= 3'd3; end
+                        3'd3: begin c_scl_oe <= 1'b1; c_cnt <= HALF[23:0];      c_ph <= 3'd4; end
+                        3'd4: begin c_scl_oe <= 1'b0; c_cnt <= HALF[23:0];
+                                    if (c_clk == 4'd0) c_ph <= 3'd5;
+                                    else begin c_clk <= c_clk - 4'd1; c_ph <= 3'd3; end end
+                        default: begin
+                            c_scl_oe <= 1'b0; c_sda_oe <= 1'b0;
+                            clr_active <= 1'b0;
+                            st <= B_START;
+                        end
+                    endcase
                 end
 
                 /* ---- 对照：不存在的地址 0x50，必须 NACK ---- */
