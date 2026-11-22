@@ -24,7 +24,11 @@ module adv7511_init #(
     parameter int CLK_HZ   = 50_000_000,
     parameter int SCL_HZ   = 100_000,
     parameter int RETRY_CY = 10_000_000,   // 重试间隔 200 ms @50MHz
-    parameter logic [6:0] I2C_ADDR = 7'h39 // ADV7511 7 位地址（8 位写地址 0x72）
+    /* FAST 模式：芯片只在上电后几毫秒内应答（实测 f_h=0x0003），
+     * 所以前 FAST_N 次用 0.5 ms 的短间隔去撞那个窗口，失败多了再退回 200 ms。 */
+    parameter int FAST_RETRY_CY = 25_000,  // 0.5 ms @50MHz
+    parameter int FAST_N        = 64,
+    parameter logic [6:0] I2C_ADDR = 7'h39  // ADV7511 7 位地址（8 位写地址 0x72）
 ) (
     input  logic clk,
     input  logic rst,
@@ -441,7 +445,8 @@ module adv7511_init #(
                             waiting    <= 1'b0;
                             abort_done <= 1'b1;
                         end
-                    end else if (wait_cnt >= RETRY_CY[31:0]) begin
+                    end else if ( (ack_err < FAST_N) ? (wait_cnt >= FAST_RETRY_CY[31:0])
+                                                    : (wait_cnt >= RETRY_CY[31:0]) ) begin
                         wait_cnt   <= 32'd0;
                         abort_done <= 1'b0;
                         idx        <= 5'd0;
