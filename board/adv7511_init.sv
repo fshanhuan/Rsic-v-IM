@@ -147,6 +147,14 @@ module adv7511_init #(
     st_t         st;
     logic        waiting;
     logic [ 4:0] idx;
+    /* ★ 2026-11-22 06:3x 关键线索：ADV7511 的 I2C 地址是 **0x72 或 0x7A**，
+     *   取决于 PD/AD 引脚（手册原文："The SDA/SCL programming address for the
+     *   Main Register Map is 0x72 or 0x7A, based on whether PD/AD is pulled high"）。
+     *   我们一直只对 0x72（7 位 0x39）说话 —— 如果板上 PD/AD 被拉高，
+     *   器件其实在 0x7A（7 位 0x3D），于是永远 NACK。
+     *   修法：地址字节 NACK 时立刻换另一个地址再试一次。 */
+    logic [6:0] cur_adr;
+    logic       tried_alt;
     logic [ 7:0] cur_reg, cur_val;
     logic [ 7:0] nack_byte;            // 最近 NACK 的字节（调试）
     logic        abort_done;            // S_WAIT 里那句 STOP 有没有发完（§52.9）
@@ -185,6 +193,8 @@ module adv7511_init #(
             last_reg   <= 8'h00;
             last_val   <= 8'h00;
             ack_err    <= 16'd0;
+            cur_adr    <= I2C_ADDR;
+            tried_alt  <= 1'b0;
             m_start    <= 1'b0;
             m_byte     <= 1'b0;
             m_stop     <= 1'b0;
@@ -321,16 +331,22 @@ module adv7511_init #(
                     if (!waiting) begin
                         m_byte  <= 1'b1;
                         m_rw    <= 1'b0;
-                        m_tx    <= {I2C_ADDR, 1'b0};
+                        m_tx    <= {cur_adr, 1'b0};
                         waiting <= 1'b1;
                     end else if (m_done) begin
                         waiting <= 1'b0;
                         if (!m_ack) begin
-                            /* 器件不在（还没上电 / 没接显示器）→ 整表重来 */
                             no_dev  <= 1'b1;
-                            nack_byte <= {I2C_ADDR, 1'b0};
+                            nack_byte <= {cur_adr, 1'b0};
                             ack_err <= ack_err + 16'd1;
-                            st      <= S_WAIT;
+                            if (!tried_alt) begin
+                                /* 换另一个地址再试（0x39 <-> 0x3D） */
+                                tried_alt <= 1'b1;
+                                cur_adr   <= (cur_adr == 7'h39) ? 7'h3D : 7'h39;
+                                st        <= S_START;
+                            end else begin
+                                st <= S_WAIT;
+                            end
                         end else begin
                             st <= S_REG;
                         end

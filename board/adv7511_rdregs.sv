@@ -125,9 +125,9 @@ module adv7511_rdregs #(
                         busy    <= 1'b1;
                         waiting <= 1'b0;
                         ack_bogus <= 1'b0;
-                        clr_active <= 1'b1; c_scl_oe <= 1'b0; c_sda_oe <= 1'b0;
+                        clr_active <= 1'b0; c_scl_oe <= 1'b0; c_sda_oe <= 1'b0;
                         c_cnt <= 24'd0; c_ph <= 3'd0; c_clk <= 4'd9;
-                        st      <= C_RUN;
+                        st      <= B_START;   // 上电对照：**不做**恢复，测自然状态
                     end
                 end
 
